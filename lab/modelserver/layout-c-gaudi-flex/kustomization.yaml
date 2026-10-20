@@ -1,0 +1,16 @@
+# Layout C: Layout A with the Gaudi pods labeled prefill-decode, so each Gaudi
+# can also prefill for the other and the A30 acts as an extra prefill source.
+# Experimental: a prefill-decode pod receives prefill requests on the routing
+# sidecar port, which forwards them to its local engine.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../layout-a-a30-prefill
+patches:
+  - target:
+      kind: Deployment
+      name: decode-gaudi3
+    patch: |-
+      - op: replace
+        path: /spec/template/metadata/labels/llm-d.ai~1role
+        value: prefill-decode

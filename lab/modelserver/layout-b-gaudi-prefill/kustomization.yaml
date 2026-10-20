@@ -1,0 +1,12 @@
+# Layout B: one Gaudi 3 prefills, the A30 decodes. Documented vllm-gaudi direction.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+components:
+  - ../common
+resources:
+  - prefill-gaudi3.yaml
+  - decode-a30.yaml
+images:
+  - name: REPLACE_GAUDI_VLLM_IMAGE
+    newName: quay.io/REPLACE_ME/vllm-gaudi-nixl
+    newTag: v0.26.0

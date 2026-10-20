@@ -1,0 +1,1219 @@
+diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
+index 4a850a4..e612620 100644
+--- a/cmd/epp/runner/runner.go
++++ b/cmd/epp/runner/runner.go
+@@ -705,6 +705,7 @@ func (r *Runner) registerInTreePlugins() {
+ 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
+ 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
+ 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
++	fwkplugin.Register(disagg.HeteroPDDeciderPluginType, fwkplugin.StabilityAlpha, disagg.HeteroPDDeciderPluginFactory)
+ 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
+ 	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, fwkplugin.StabilityBeta, kvcacheutilization.KvCacheUtilizationScorerFactory)
+ 	fwkplugin.Register(queuedepth.QueueScorerType, fwkplugin.StabilityBeta, queuedepth.QueueScorerFactory)
+diff --git a/deploy/config/hetero-pd-epp-config.yaml b/deploy/config/hetero-pd-epp-config.yaml
+new file mode 100644
+index 0000000..ed8ba8f
+--- /dev/null
++++ b/deploy/config/hetero-pd-epp-config.yaml
+@@ -0,0 +1,52 @@
++# Sample EPP configuration for P/D with prefill and decode pools of different
++# accelerator classes. Pods carry llm-d.ai/role and llm-d.ai/accelerator-class.
++# Profile throughputs are placeholders: measure them for your model and hardware.
++apiVersion: llm-d.ai/v1
++kind: EndpointPickerConfig
++plugins:
++- type: approx-prefix-cache-producer
++  parameters:
++    maxPrefixTokensToMatch: 16384
++    lruCapacityPerServer: 31250
++- type: prefix-cache-scorer
++- type: queue-scorer
++- type: prefill-filter
++- type: decode-filter
++- type: max-score-picker
++- type: disagg-profile-handler
++  parameters:
++    deciders:
++      prefill: hetero-pd-decider
++- type: hetero-pd-decider
++  parameters:
++    kvBytesPerToken: 131072
++    ttftSLOMs: 1000
++    stallWeight: 0.25
++    safetyMargin: 0.1
++    maxDecodeKVUsage: 0.9
++    minUncachedTokens: 256
++    bandwidthGbps: 25
++    avgQueuedPromptTokens: 1024
++    fallbackNonCachedTokens: 1024
++    profiles:
++      nvidia-a30:
++        prefillTokensPerSec: 5000
++      intel-gaudi3:
++        prefillTokensPerSec: 20000
++schedulingProfiles:
++- name: prefill
++  plugins:
++  - pluginRef: prefill-filter
++  - pluginRef: max-score-picker
++  - pluginRef: prefix-cache-scorer
++    weight: 2
++  - pluginRef: queue-scorer
++    weight: 1
++- name: decode
++  plugins:
++  - pluginRef: decode-filter
++  - pluginRef: max-score-picker
++  - pluginRef: prefix-cache-scorer
++    weight: 2
++  - pluginRef: queue-scorer
++    weight: 1
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
+index 1ced7fa..e1ceffa 100644
+--- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
+@@ -9,6 +9,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
+ - [Decider Plugins](#decider-plugins)
+   - [PrefixBasedPDDecider](#prefixbasedpddecider)
+   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
++  - [HeteroPDDecider](#heteropddecider)
+   - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
+ 
+ ---
+@@ -168,6 +169,70 @@ None.
+ 
+ ---
+ 
++### HeteroPDDecider
++
++**Type:** `hetero-pd-decider`
++
++Decides per request whether to prefill on another pod or on the selected decode pod when prefill and decode pods run on different accelerator classes. Status: Alpha.
++
++#### What it does
++
++After the decode pod is selected, compares two estimates for the request's uncached tokens U:
++
++- Remote: `U / R_P + Q_P + U * kvBytesPerToken / bandwidth`, using the best prefill-capable pod.
++- Local: `U / R_D + Q_D`, plus a stall cost `N_D * U / R_D` weighted by `stallWeight`, where `N_D` is the number of requests running on the decode pod.
++
++R is the prefill throughput of the pod's accelerator class (from `profiles`), and Q is the waiting queue times `avgQueuedPromptTokens / R`. Remote prefill runs when its estimate is within `ttftSLOMs` and lower than `(1 - safetyMargin) * (local + stallWeight * stall)`.
++
++Requests stay local when U is below `minUncachedTokens`, when decode KV usage is at or above `maxDecodeKVUsage`, when no compatible prefill pod exists, or when a pod carries the disable label. When the decode pod's class has no profile, the decider applies `fallbackNonCachedTokens` as a plain threshold.
++
++Every decision increments `llm_d_epp_hetero_pd_decision_total{plugin_name, reason, remote_prefill}`. Per-request estimates are logged at DEBUG verbosity.
++
++#### How It Works
++
++The plugin is also a DataProducer. `Produce` runs before scheduling with all candidate endpoints and keeps the prefill-capable ones (`prefill`, `encode-prefill`, `prefill-decode`, `encode-prefill-decode` roles) with their current metrics. The decider reads that view because it only receives the selected decode endpoint.
++
++#### Inputs consumed
++
++- `PrefixCacheMatchInfo` on the decode endpoint, to subtract cached tokens. Missing info is treated as no cached prefix.
++- Tokenized prompt length.
++- Endpoint metrics: running requests, waiting queue size, KV cache usage.
++- Pod labels: accelerator class, model fingerprint, disable flag.
++
++#### Configuration
++
++##### Parameters
++
++| Parameter | Default | Description |
++| --- | --- | --- |
++| `profiles` | none | Map of accelerator class to `{prefillTokensPerSec}`. |
++| `acceleratorLabel` | `llm-d.ai/accelerator-class` | Pod label holding the accelerator class. |
++| `fingerprintLabel` | `llm-d.ai/model-fingerprint` | Pods with different non-empty values never exchange KV. Empty disables the check. |
++| `disableLabel` | `llm-d.ai/hetero-pd-disabled` | A pod with this label set to `true` is excluded as prefill source and as remote-prefill destination. |
++| `kvBytesPerToken` | `131072` | KV bytes per token across all layers. |
++| `ttftSLOMs` | `0` | Remote estimates above this are rejected. Zero disables the check. |
++| `stallWeight` | `0.25` | Weight of decode stall seconds against time to first token. |
++| `safetyMargin` | `0.1` | Fraction by which remote must beat local. |
++| `maxDecodeKVUsage` | `0.9` | Decode KV usage at which requests stay local. |
++| `minUncachedTokens` | `256` | Requests with fewer uncached tokens stay local. |
++| `bandwidthGbps` | `10` | KV transfer bandwidth between classes. |
++| `sameClassBandwidthGbps` | `0` | Bandwidth between pods of the same class. Zero uses `bandwidthGbps`. |
++| `avgQueuedPromptTokens` | `1024` | Prompt tokens assumed per waiting request. |
++| `fallbackNonCachedTokens` | `1024` | Threshold used when the decode class has no profile. Zero keeps such requests local. |
++| `prefixMatchInfoProducerName` | approximate producer | Prefix producer whose match info is read. |
++
++##### Example
++
++See [`deploy/config/hetero-pd-epp-config.yaml`](../../../../../../../deploy/config/hetero-pd-epp-config.yaml).
++
++#### Limitations
++
++- The decider estimates from the best prefill pod; the prefill profile's own scorers may pick a different one.
++- Queue delay assumes `avgQueuedPromptTokens` per waiting request; it does not read per-request prompt lengths.
++- Bandwidth is static configuration.
++
++---
++
+ ### AlwaysDisaggMultimodalDecider
+ 
+ **Type:** `always-disagg-multimodal-decider`
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
+new file mode 100644
+index 0000000..000cc34
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
+@@ -0,0 +1,228 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++// Package hetero holds the P/D split decision for pools of different
++// accelerator classes. It depends only on the standard library so the
++// decision can be tested and simulated outside the EPP.
++package hetero
++
++import (
++	"errors"
++	"fmt"
++	"math"
++)
++
++// Reason values explain a Decision. They are used as a metric label.
++const (
++	ReasonRemoteBetter       = "remote-better"
++	ReasonLocalBetter        = "local-better"
++	ReasonShortPrompt        = "short-prompt"
++	ReasonDecodeKVFull       = "decode-kv-full"
++	ReasonDecodeDisabled     = "decode-disabled"
++	ReasonNoPrefillCandidate = "no-prefill-candidate"
++	ReasonSLOMiss            = "remote-misses-slo"
++	ReasonMissingProfile     = "missing-profile"
++)
++
++// Profile is the measured prefill throughput of one accelerator class
++// for the served model.
++type Profile struct {
++	PrefillTokensPerSec float64 `json:"prefillTokensPerSec"`
++}
++
++// Config holds the decision parameters.
++type Config struct {
++	// KVBytesPerToken is the KV-cache size of one token across all layers.
++	KVBytesPerToken int64 `json:"kvBytesPerToken"`
++	// TTFTSLOMs rejects the remote path when its estimate exceeds it. Zero disables the check.
++	TTFTSLOMs float64 `json:"ttftSLOMs"`
++	// StallWeight is the cost of one second of decode stall, summed over the
++	// streams running on the decode pod, relative to one second of the new
++	// request's time to first token.
++	StallWeight float64 `json:"stallWeight"`
++	// SafetyMargin is the fraction by which remote must beat local, in [0, 1).
++	SafetyMargin float64 `json:"safetyMargin"`
++	// MaxDecodeKVUsage keeps requests local when decode KV usage (0 to 1) is at or above it.
++	MaxDecodeKVUsage float64 `json:"maxDecodeKVUsage"`
++	// MinUncachedTokens keeps requests with fewer uncached tokens local without estimation.
++	MinUncachedTokens int `json:"minUncachedTokens"`
++	// BandwidthGbps is the prefill-to-decode KV transfer bandwidth across classes.
++	BandwidthGbps float64 `json:"bandwidthGbps"`
++	// SameClassBandwidthGbps applies when both pods share a class. Zero means BandwidthGbps.
++	SameClassBandwidthGbps float64 `json:"sameClassBandwidthGbps"`
++	// AvgQueuedPromptTokens estimates the prefill work behind each waiting request.
++	AvgQueuedPromptTokens int `json:"avgQueuedPromptTokens"`
++	// Profiles maps accelerator class to its prefill throughput.
++	Profiles map[string]Profile `json:"profiles"`
++}
++
++// DefaultConfig returns the parameter defaults. Profiles are left empty and must be measured.
++func DefaultConfig() Config {
++	return Config{
++		KVBytesPerToken:       131072,
++		TTFTSLOMs:             0,
++		StallWeight:           0.25,
++		SafetyMargin:          0.1,
++		MaxDecodeKVUsage:      0.9,
++		MinUncachedTokens:     256,
++		BandwidthGbps:         10,
++		AvgQueuedPromptTokens: 1024,
++		Profiles:              map[string]Profile{},
++	}
++}
++
++// Validate reports the first invalid parameter.
++func (c Config) Validate() error {
++	switch {
++	case c.KVBytesPerToken <= 0:
++		return errors.New("kvBytesPerToken must be positive")
++	case c.TTFTSLOMs < 0:
++		return errors.New("ttftSLOMs cannot be negative")
++	case c.StallWeight < 0:
++		return errors.New("stallWeight cannot be negative")
++	case c.SafetyMargin < 0 || c.SafetyMargin >= 1:
++		return errors.New("safetyMargin must be in [0, 1)")
++	case c.MaxDecodeKVUsage <= 0 || c.MaxDecodeKVUsage > 1:
++		return errors.New("maxDecodeKVUsage must be in (0, 1]")
++	case c.MinUncachedTokens < 0:
++		return errors.New("minUncachedTokens cannot be negative")
++	case c.BandwidthGbps <= 0:
++		return errors.New("bandwidthGbps must be positive")
++	case c.SameClassBandwidthGbps < 0:
++		return errors.New("sameClassBandwidthGbps cannot be negative")
++	case c.AvgQueuedPromptTokens < 0:
++		return errors.New("avgQueuedPromptTokens cannot be negative")
++	}
++	for class, p := range c.Profiles {
++		if p.PrefillTokensPerSec <= 0 {
++			return fmt.Errorf("profile %q: prefillTokensPerSec must be positive", class)
++		}
++	}
++	return nil
++}
++
++// Pod is the state of one candidate pod at decision time.
++type Pod struct {
++	Name  string
++	Class string
++	// Fingerprint identifies the served model build. Pods with different
++	// non-empty fingerprints never exchange KV.
++	Fingerprint string
++	Running     int
++	Waiting     int
++	KVUsage     float64
++	Disabled    bool
++}
++
++// Decision is the outcome for one request. Seconds fields are zero when not estimated.
++type Decision struct {
++	Remote bool
++	// Fallback is set when the inputs cannot be estimated; the caller applies its default rule.
++	Fallback bool
++	Reason   string
++	// Prefill names the prefill pod the estimate used when Remote is set.
++	Prefill         string
++	RemoteSeconds   float64
++	LocalSeconds    float64
++	StallSeconds    float64
++	TransferSeconds float64
++}
++
++func (c Config) rate(class string) (float64, bool) {
++	p, ok := c.Profiles[class]
++	return p.PrefillTokensPerSec, ok && p.PrefillTokensPerSec > 0
++}
++
++func (c Config) bandwidthBytesPerSec(from, to string) float64 {
++	gbps := c.BandwidthGbps
++	if from == to && from != "" && c.SameClassBandwidthGbps > 0 {
++		gbps = c.SameClassBandwidthGbps
++	}
++	return gbps * 1e9 / 8
++}
++
++func (c Config) queueSeconds(p Pod, rate float64) float64 {
++	return float64(p.Waiting*c.AvgQueuedPromptTokens) / rate
++}
++
++func compatible(a, b Pod) bool {
++	return a.Fingerprint == "" || b.Fingerprint == "" || a.Fingerprint == b.Fingerprint
++}
++
++// Decide chooses between prefilling uncached tokens on the decode pod and
++// prefilling them on the best prefill candidate followed by a KV transfer.
++//
++//	remote = U/R_P + Q_P + U*b/BW
++//	local  = U/R_D + Q_D
++//	stall  = N_D * U/R_D
++//	split when remote <= SLO and remote < (1 - margin) * (local + w * stall)
++func Decide(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
++	if uncachedTokens < c.MinUncachedTokens || uncachedTokens <= 0 {
++		return Decision{Reason: ReasonShortPrompt}
++	}
++	if decode.Disabled {
++		return Decision{Reason: ReasonDecodeDisabled}
++	}
++	if decode.KVUsage >= c.MaxDecodeKVUsage {
++		return Decision{Reason: ReasonDecodeKVFull}
++	}
++	rateD, ok := c.rate(decode.Class)
++	if !ok {
++		return Decision{Fallback: true, Reason: ReasonMissingProfile}
++	}
++
++	u := float64(uncachedTokens)
++	local := u/rateD + c.queueSeconds(decode, rateD)
++	stall := float64(decode.Running) * u / rateD
++
++	best := Decision{Reason: ReasonNoPrefillCandidate, RemoteSeconds: math.Inf(1)}
++	sawCandidate := false
++	for _, p := range prefill {
++		if p.Name == decode.Name || p.Disabled || !compatible(p, decode) {
++			continue
++		}
++		rateP, ok := c.rate(p.Class)
++		if !ok {
++			continue
++		}
++		sawCandidate = true
++		transfer := u * float64(c.KVBytesPerToken) / c.bandwidthBytesPerSec(p.Class, decode.Class)
++		remote := u/rateP + c.queueSeconds(p, rateP) + transfer
++		if remote < best.RemoteSeconds {
++			best = Decision{Prefill: p.Name, RemoteSeconds: remote, TransferSeconds: transfer}
++		}
++	}
++
++	best.LocalSeconds = local
++	best.StallSeconds = stall
++	if !sawCandidate {
++		best.RemoteSeconds = 0
++		best.Reason = ReasonNoPrefillCandidate
++		best.Prefill = ""
++		return best
++	}
++	if c.TTFTSLOMs > 0 && best.RemoteSeconds*1000 > c.TTFTSLOMs {
++		best.Reason = ReasonSLOMiss
++		return best
++	}
++	if best.RemoteSeconds < (1-c.SafetyMargin)*(local+c.StallWeight*stall) {
++		best.Remote = true
++		best.Reason = ReasonRemoteBetter
++		return best
++	}
++	best.Reason = ReasonLocalBetter
++	return best
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
+new file mode 100644
+index 0000000..2a83a11
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
+@@ -0,0 +1,213 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package hetero
++
++import (
++	"math"
++	"testing"
++)
++
++const (
++	classA30    = "nvidia-a30"
++	classGaudi3 = "intel-gaudi3"
++	promptLong  = 2000
++)
++
++// labConfig models one A30 prefill pod feeding Gaudi 3 decode pods over
++// 25 GbE with Llama-3.1-8B. Throughputs are placeholders, not measurements.
++func labConfig() Config {
++	c := DefaultConfig()
++	c.TTFTSLOMs = 1000
++	c.BandwidthGbps = 25
++	c.Profiles = map[string]Profile{
++		classA30:    {PrefillTokensPerSec: 5000},
++		classGaudi3: {PrefillTokensPerSec: 20000},
++	}
++	return c
++}
++
++func a30(waiting int) Pod {
++	return Pod{Name: "a30-0", Class: classA30, Waiting: waiting}
++}
++
++func gaudi(running int) Pod {
++	return Pod{Name: "gaudi-0", Class: classGaudi3, Running: running}
++}
++
++func TestDecideLabScenarios(t *testing.T) {
++	tests := []struct {
++		name       string
++		tokens     int
++		decode     Pod
++		prefill    []Pod
++		wantRemote bool
++		wantReason string
++	}{
++		{"long prompt, busy decode pod offloads", promptLong, gaudi(40), []Pod{a30(0)}, true, ReasonRemoteBetter},
++		{"long prompt, idle decode pod prefills locally", promptLong, gaudi(0), []Pod{a30(0)}, false, ReasonLocalBetter},
++		{"short prompt stays local", 200, gaudi(40), []Pod{a30(0)}, false, ReasonShortPrompt},
++		{"prefill queue breaks the SLO", promptLong, gaudi(40), []Pod{a30(3)}, false, ReasonSLOMiss},
++		{"decode KV nearly full", promptLong, Pod{Name: "gaudi-0", Class: classGaudi3, Running: 40, KVUsage: 0.95}, []Pod{a30(0)}, false, ReasonDecodeKVFull},
++		{"decode pod opted out", promptLong, Pod{Name: "gaudi-0", Class: classGaudi3, Running: 40, Disabled: true}, []Pod{a30(0)}, false, ReasonDecodeDisabled},
++		{"no prefill pods", promptLong, gaudi(40), nil, false, ReasonNoPrefillCandidate},
++		{"decode pod is not its own prefill candidate", promptLong, gaudi(40), []Pod{gaudi(0)}, false, ReasonNoPrefillCandidate},
++		{"unknown decode class falls back", promptLong, Pod{Name: "x", Class: "unknown", Running: 40}, []Pod{a30(0)}, false, ReasonMissingProfile},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			d := Decide(labConfig(), tt.tokens, tt.decode, tt.prefill)
++			if d.Remote != tt.wantRemote || d.Reason != tt.wantReason {
++				t.Fatalf("got remote=%v reason=%q, want remote=%v reason=%q (%+v)",
++					d.Remote, d.Reason, tt.wantRemote, tt.wantReason, d)
++			}
++		})
++	}
++}
++
++func TestDecideEstimates(t *testing.T) {
++	d := Decide(labConfig(), promptLong, gaudi(40), []Pod{a30(0)})
++	// 2000 tokens / 5000 tok/s + 2000 * 131072 B / 3.125e9 B/s
++	wantTransfer := 2000.0 * 131072 / 3.125e9
++	assertNear(t, "transfer", d.TransferSeconds, wantTransfer)
++	assertNear(t, "remote", d.RemoteSeconds, 0.4+wantTransfer)
++	assertNear(t, "local", d.LocalSeconds, 0.1)
++	assertNear(t, "stall", d.StallSeconds, 4.0)
++	if d.Prefill != "a30-0" {
++		t.Fatalf("prefill pod %q, want a30-0", d.Prefill)
++	}
++}
++
++func TestDecideMissingProfileFallsBack(t *testing.T) {
++	d := Decide(labConfig(), promptLong, Pod{Name: "x", Class: "unknown"}, []Pod{a30(0)})
++	if !d.Fallback {
++		t.Fatalf("want fallback, got %+v", d)
++	}
++}
++
++func TestDecideBurstSplitsUntilSLO(t *testing.T) {
++	// Each request queued on the A30 adds AvgQueuedPromptTokens / 5000 s.
++	remote := 0
++	for waiting := 0; waiting < 10; waiting++ {
++		if Decide(labConfig(), promptLong, gaudi(40), []Pod{a30(waiting)}).Remote {
++			remote++
++		}
++	}
++	if remote != 3 {
++		t.Fatalf("remote decisions in a burst of 10 = %d, want 3", remote)
++	}
++}
++
++func TestDecideStallCrossover(t *testing.T) {
++	// Busy decode pods offload; lightly loaded ones keep prefill local.
++	var firstRemote = -1
++	for running := 0; running <= 64; running++ {
++		if Decide(labConfig(), promptLong, gaudi(running), []Pod{a30(0)}).Remote {
++			firstRemote = running
++			break
++		}
++	}
++	if firstRemote < 10 || firstRemote > 30 {
++		t.Fatalf("first offload at %d running streams, want between 10 and 30", firstRemote)
++	}
++	for running := firstRemote; running <= 64; running++ {
++		if !Decide(labConfig(), promptLong, gaudi(running), []Pod{a30(0)}).Remote {
++			t.Fatalf("decision flipped back to local at %d running streams", running)
++		}
++	}
++}
++
++func TestDecidePicksFastestPrefillCandidate(t *testing.T) {
++	c := labConfig()
++	c.Profiles["nvidia-b200"] = Profile{PrefillTokensPerSec: 50000}
++	b200Busy := Pod{Name: "b200-0", Class: "nvidia-b200", Waiting: 40}
++	d := Decide(c, promptLong, gaudi(40), []Pod{a30(0), b200Busy})
++	if d.Prefill != "a30-0" {
++		t.Fatalf("with a queued B200 want a30-0, got %q", d.Prefill)
++	}
++	b200Idle := Pod{Name: "b200-0", Class: "nvidia-b200"}
++	d = Decide(c, promptLong, gaudi(40), []Pod{a30(0), b200Idle})
++	if d.Prefill != "b200-0" {
++		t.Fatalf("with an idle B200 want b200-0, got %q", d.Prefill)
++	}
++}
++
++func TestDecideSameClassBandwidth(t *testing.T) {
++	c := labConfig()
++	c.SameClassBandwidthGbps = 200
++	peer := Pod{Name: "gaudi-1", Class: classGaudi3}
++	d := Decide(c, promptLong, gaudi(40), []Pod{a30(0), peer})
++	if d.Prefill != "gaudi-1" || !d.Remote {
++		t.Fatalf("want remote prefill on the idle Gaudi peer, got %+v", d)
++	}
++	assertNear(t, "transfer", d.TransferSeconds, 2000.0*131072/25e9)
++}
++
++func TestDecideFingerprintMismatch(t *testing.T) {
++	decode := gaudi(40)
++	decode.Fingerprint = "llama-3.1-8b@abc"
++	other := a30(0)
++	other.Fingerprint = "llama-3.1-8b@def"
++	d := Decide(labConfig(), promptLong, decode, []Pod{other})
++	if d.Remote || d.Reason != ReasonNoPrefillCandidate {
++		t.Fatalf("mismatched fingerprints must not split, got %+v", d)
++	}
++	other.Fingerprint = decode.Fingerprint
++	if !Decide(labConfig(), promptLong, decode, []Pod{other}).Remote {
++		t.Fatal("matching fingerprints should split")
++	}
++}
++
++func TestDecideZeroSLODisablesCheck(t *testing.T) {
++	c := labConfig()
++	c.TTFTSLOMs = 0
++	if !Decide(c, promptLong, gaudi(200), []Pod{a30(20)}).Remote {
++		t.Fatal("without an SLO a heavily loaded decode pod should still offload")
++	}
++}
++
++func TestConfigValidate(t *testing.T) {
++	if err := labConfig().Validate(); err != nil {
++		t.Fatalf("lab config invalid: %v", err)
++	}
++	bad := []func(*Config){
++		func(c *Config) { c.KVBytesPerToken = 0 },
++		func(c *Config) { c.TTFTSLOMs = -1 },
++		func(c *Config) { c.StallWeight = -1 },
++		func(c *Config) { c.SafetyMargin = 1 },
++		func(c *Config) { c.MaxDecodeKVUsage = 0 },
++		func(c *Config) { c.MaxDecodeKVUsage = 1.5 },
++		func(c *Config) { c.MinUncachedTokens = -1 },
++		func(c *Config) { c.BandwidthGbps = 0 },
++		func(c *Config) { c.SameClassBandwidthGbps = -1 },
++		func(c *Config) { c.AvgQueuedPromptTokens = -1 },
++		func(c *Config) { c.Profiles["bad"] = Profile{} },
++	}
++	for i, mutate := range bad {
++		c := labConfig()
++		mutate(&c)
++		if c.Validate() == nil {
++			t.Errorf("case %d: invalid config accepted", i)
++		}
++	}
++}
++
++func assertNear(t *testing.T, name string, got, want float64) {
++	t.Helper()
++	if math.Abs(got-want) > 1e-9 {
++		t.Fatalf("%s = %v, want %v", name, got, want)
++	}
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
+new file mode 100644
+index 0000000..1253c5b
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
+@@ -0,0 +1,279 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package disagg
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strconv"
++	"sync"
++	"sync/atomic"
++
++	"sigs.k8s.io/controller-runtime/pkg/log"
++
++	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
++	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
++	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
++	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero"
++)
++
++const (
++	// HeteroPDDeciderPluginType is the type-name of the heteroPDDecider plugin.
++	HeteroPDDeciderPluginType = "hetero-pd-decider"
++
++	defaultAcceleratorLabel = "llm-d.ai/accelerator-class"
++	defaultFingerprintLabel = "llm-d.ai/model-fingerprint"
++	defaultDisableLabel     = "llm-d.ai/hetero-pd-disabled"
++)
++
++// HeteroPDDeciderConfig holds the configuration for the heteroPDDecider plugin.
++// The decision parameters are documented on hetero.Config.
++type HeteroPDDeciderConfig struct {
++	hetero.Config
++
++	// AcceleratorLabel is the pod label holding the accelerator class used to look up profiles.
++	AcceleratorLabel string `json:"acceleratorLabel"`
++	// FingerprintLabel is the pod label identifying the served model build.
++	// Pods whose values differ never exchange KV. Empty disables the check.
++	FingerprintLabel string `json:"fingerprintLabel"`
++	// DisableLabel excludes a pod from remote prefill, as source or destination, when set to "true".
++	DisableLabel string `json:"disableLabel"`
++	// FallbackNonCachedTokens is the threshold applied when the decode pod's class has no profile.
++	// Zero keeps such requests local.
++	FallbackNonCachedTokens int `json:"fallbackNonCachedTokens"`
++	// PrefixMatchInfoProducerName selects which prefix-cache producer's
++	// PrefixCacheMatchInfo to read on the decode endpoint. Empty defaults to the
++	// approximate-prefix producer.
++	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
++}
++
++func defaultHeteroPDDeciderConfig() HeteroPDDeciderConfig {
++	return HeteroPDDeciderConfig{
++		Config:                  hetero.DefaultConfig(),
++		AcceleratorLabel:        defaultAcceleratorLabel,
++		FingerprintLabel:        defaultFingerprintLabel,
++		DisableLabel:            defaultDisableLabel,
++		FallbackNonCachedTokens: 1024,
++	}
++}
++
++func (c HeteroPDDeciderConfig) validate() error {
++	if c.AcceleratorLabel == "" {
++		return errors.New("acceleratorLabel cannot be empty")
++	}
++	if c.FallbackNonCachedTokens < 0 {
++		return errors.New("fallbackNonCachedTokens cannot be negative")
++	}
++	return c.Config.Validate()
++}
++
++// compile-time type assertions
++var (
++	_ deciderPlugin           = &HeteroPDDecider{}
++	_ fwkrc.DataProducer      = &HeteroPDDecider{}
++	_ plugin.ConsumerPlugin   = &HeteroPDDecider{}
++	_ prefixMatchInfoConsumer = &HeteroPDDecider{}
++)
++
++var prefillCapableRoles = map[string]struct{}{
++	bylabel.RolePrefill:             {},
++	bylabel.RoleEncodePrefill:       {},
++	bylabel.RolePrefillDecode:       {},
++	bylabel.RoleEncodePrefillDecode: {},
++}
++
++// HeteroPDDecider decides per request whether to prefill on another pod,
++// comparing estimated time to first token plus the stall local prefill
++// imposes on running decode streams. Accelerator classes are read from a pod
++// label and mapped to measured prefill throughput.
++//
++// It is also a DataProducer: Produce runs before scheduling with every
++// candidate endpoint and caches the prefill-capable pods, because the decider
++// itself only receives the selected decode endpoint.
++type HeteroPDDecider struct {
++	typedName         plugin.TypedName
++	config            HeteroPDDeciderConfig
++	prefixMatchInfoDK plugin.DataKey
++	prefillPods       atomic.Pointer[[]hetero.Pod]
++	warnNoPrefillView sync.Once
++}
++
++// HeteroPDDeciderPluginFactory defines the factory function for creating
++// a new instance of the heteroPDDecider.
++func HeteroPDDeciderPluginFactory(name string, rawParameters *json.Decoder,
++	_ plugin.Handle) (plugin.Plugin, error) {
++	config := defaultHeteroPDDeciderConfig()
++	if rawParameters != nil {
++		if err := rawParameters.Decode(&config); err != nil {
++			return nil, fmt.Errorf("failed to parse %s plugin config: %w", HeteroPDDeciderPluginType, err)
++		}
++	}
++	decider, err := NewHeteroPDDecider(config)
++	if err != nil {
++		return nil, fmt.Errorf("failed to create %s plugin: %w", HeteroPDDeciderPluginType, err)
++	}
++	return decider.WithName(name), nil
++}
++
++// NewHeteroPDDecider validates the configuration and returns the plugin.
++func NewHeteroPDDecider(config HeteroPDDeciderConfig) (*HeteroPDDecider, error) {
++	if err := config.validate(); err != nil {
++		return nil, err
++	}
++	return &HeteroPDDecider{
++		typedName: plugin.TypedName{Type: HeteroPDDeciderPluginType},
++		config:    config,
++		prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(
++			config.PrefixMatchInfoProducerName,
++		),
++	}, nil
++}
++
++// TypedName returns the typed name of the plugin.
++func (d *HeteroPDDecider) TypedName() plugin.TypedName {
++	return d.typedName
++}
++
++// WithName sets the name of the plugin.
++func (d *HeteroPDDecider) WithName(name string) *HeteroPDDecider {
++	d.typedName.Name = name
++	return d
++}
++
++func (d *HeteroPDDecider) prefixMatchInfoDataKey() plugin.DataKey {
++	return d.prefixMatchInfoDK
++}
++
++// Produces declares no request attributes; the prefill view is plugin state.
++func (d *HeteroPDDecider) Produces() map[plugin.DataKey]any {
++	return map[plugin.DataKey]any{}
++}
++
++// Consumes declares the tokenized prompt, the decode endpoint's prefix match
++// info, and the endpoint metrics the estimate reads.
++func (d *HeteroPDDecider) Consumes() plugin.DataDependencies {
++	return plugin.DataDependencies{
++		Required: map[plugin.DataKey]any{
++			d.prefixMatchInfoDK:                  attrprefix.PrefixCacheMatchInfo{},
++			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
++			plugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType): float64(0),
++			plugin.NewDataKey(metrics.WaitingQueueSizeKey, metrics.MetricsExtractorType):    int(0),
++			plugin.NewDataKey(metrics.RunningRequestsSizeKey, metrics.MetricsExtractorType): int(0),
++		},
++	}
++}
++
++// Produce caches the prefill-capable endpoints and their load for the decision.
++func (d *HeteroPDDecider) Produce(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
++	pods := make([]hetero.Pod, 0, len(endpoints))
++	for _, ep := range endpoints {
++		meta := ep.GetMetadata()
++		if meta == nil {
++			continue
++		}
++		if _, ok := prefillCapableRoles[meta.Labels[bylabel.RoleLabel]]; !ok {
++			continue
++		}
++		pods = append(pods, d.toPod(ep))
++	}
++	d.prefillPods.Store(&pods)
++	return nil
++}
++
++func (d *HeteroPDDecider) toPod(ep scheduling.Endpoint) hetero.Pod {
++	pod := hetero.Pod{}
++	if meta := ep.GetMetadata(); meta != nil {
++		pod.Name = meta.ID.String()
++		pod.Class = meta.Labels[d.config.AcceleratorLabel]
++		if d.config.FingerprintLabel != "" {
++			pod.Fingerprint = meta.Labels[d.config.FingerprintLabel]
++		}
++		if d.config.DisableLabel != "" {
++			pod.Disabled, _ = strconv.ParseBool(meta.Labels[d.config.DisableLabel])
++		}
++	}
++	if m := ep.GetMetrics(); m != nil {
++		pod.Running = m.RunningRequestsSize
++		pod.Waiting = m.WaitingQueueSize
++		pod.KVUsage = m.KVCacheUsagePercent
++	}
++	return pod
++}
++
++func (d *HeteroPDDecider) uncachedTokens(request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) (int, error) {
++	inputTokens, err := getUserInputLenInTokens(request)
++	if err != nil {
++		return 0, fmt.Errorf("failed to get user input length in tokens: %w", err)
++	}
++	raw, ok := endpoint.Get(d.prefixMatchInfoDK)
++	if !ok || raw == nil {
++		return inputTokens, nil
++	}
++	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
++	if !ok {
++		return 0, fmt.Errorf("prefix cache match info from %s has unexpected type: %T", d.prefixMatchInfoDK, raw)
++	}
++	return max(inputTokens-info.CachedBlockCount()*info.BlockSizeTokens(), 0), nil
++}
++
++// disaggregate reports whether remote prefill should run for this request.
++// Any read failure is logged and returns false so scheduling falls back to
++// the decode-only path.
++func (d *HeteroPDDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, endpoint scheduling.Endpoint) bool {
++	logger := log.FromContext(ctx)
++	if endpoint == nil {
++		logger.Error(errors.New("endpoint is nil"), "hetero-pd-decider: skipping remote prefill")
++		return false
++	}
++	uncached, err := d.uncachedTokens(request, endpoint)
++	if err != nil {
++		logger.Error(err, "hetero-pd-decider: skipping remote prefill")
++		return false
++	}
++
++	var prefill []hetero.Pod
++	if snapshot := d.prefillPods.Load(); snapshot != nil {
++		prefill = *snapshot
++	} else {
++		d.warnNoPrefillView.Do(func() {
++			logger.Info("hetero-pd-decider has no prefill pod view; Produce has not run. " +
++				"Confirm the plugin is listed under plugins so the request-control layer calls it.")
++		})
++	}
++
++	decision := hetero.Decide(d.config.Config, uncached, d.toPod(endpoint), prefill)
++	if decision.Fallback {
++		decision.Remote = d.config.FallbackNonCachedTokens > 0 && uncached >= d.config.FallbackNonCachedTokens
++	}
++	recordHeteroPDDecision(d.typedName.Name, decision.Reason, decision.Remote)
++
++	if v := logger.V(logging.DEBUG); v.Enabled() {
++		v.Info("hetero-pd-decider decision",
++			"remote", decision.Remote, "reason", decision.Reason, "fallback", decision.Fallback,
++			"uncachedTokens", uncached, "prefillPod", decision.Prefill,
++			"remoteSeconds", decision.RemoteSeconds, "localSeconds", decision.LocalSeconds,
++			"stallSeconds", decision.StallSeconds, "transferSeconds", decision.TransferSeconds)
++	}
++	return decision.Remote
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
+new file mode 100644
+index 0000000..dd553a4
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
+@@ -0,0 +1,274 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package disagg
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/prometheus/client_golang/prometheus/testutil"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	k8stypes "k8s.io/apimachinery/pkg/types"
++
++	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
++	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero"
++)
++
++const (
++	heteroClassA30   = "nvidia-a30"
++	heteroClassGaudi = "intel-gaudi3"
++	heteroPrompt     = 2000
++)
++
++// heteroLabConfig models one A30 prefill pod feeding Gaudi 3 decode pods over 25 GbE.
++// Throughputs are placeholders, not measurements.
++func heteroLabConfig() HeteroPDDeciderConfig {
++	c := defaultHeteroPDDeciderConfig()
++	c.TTFTSLOMs = 1000
++	c.BandwidthGbps = 25
++	c.Profiles = map[string]hetero.Profile{
++		heteroClassA30:   {PrefillTokensPerSec: 5000},
++		heteroClassGaudi: {PrefillTokensPerSec: 20000},
++	}
++	return c
++}
++
++func heteroEndpoint(name, role, class string, running, waiting int, kvUsage float64, extra map[string]string) scheduling.Endpoint {
++	labels := map[string]string{bylabel.RoleLabel: role, defaultAcceleratorLabel: class}
++	for k, v := range extra {
++		labels[k] = v
++	}
++	m := fwkdl.NewMetrics()
++	m.RunningRequestsSize = running
++	m.WaitingQueueSize = waiting
++	m.KVCacheUsagePercent = kvUsage
++	return scheduling.NewEndpoint(
++		&fwkdl.EndpointMetadata{
++			ID:      k8stypes.NamespacedName{Namespace: "default", Name: name},
++			Address: testEndpointAddr,
++			Port:    testEndpointPort,
++			Labels:  labels,
++		},
++		m,
++		fwkdl.NewAttributes(),
++	)
++}
++
++func newTestHeteroDecider(t *testing.T, c HeteroPDDeciderConfig) *HeteroPDDecider {
++	t.Helper()
++	d, err := NewHeteroPDDecider(c)
++	require.NoError(t, err)
++	return d.WithName("hetero")
++}
++
++func TestHeteroPDDeciderLabScenarios(t *testing.T) {
++	a30Idle := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, nil)
++	a30Queued := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 3, 0, nil)
++
++	tests := []struct {
++		name    string
++		tokens  int
++		decode  scheduling.Endpoint
++		pool    []scheduling.Endpoint
++		produce bool
++		want    bool
++	}{
++		{
++			name:    "busy decode pod offloads a long prompt",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{a30Idle},
++			produce: true,
++			want:    true,
++		},
++		{
++			name:    "idle decode pod prefills locally",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 0, 0, 0.1, nil),
++			pool:    []scheduling.Endpoint{a30Idle},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "short prompt stays local",
++			tokens:  100,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{a30Idle},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "queued prefill pod would miss the SLO",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{a30Queued},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "decode KV nearly full",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.95, nil),
++			pool:    []scheduling.Endpoint{a30Idle},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "decode pods are not prefill candidates",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{heteroEndpoint("gaudi-1", bylabel.RoleDecode, heteroClassGaudi, 0, 0, 0, nil)},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "prefill-decode peer is a candidate",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RolePrefillDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{heteroEndpoint("gaudi-1", bylabel.RolePrefillDecode, heteroClassGaudi, 0, 0, 0, nil)},
++			produce: true,
++			want:    true,
++		},
++		{
++			name:    "fingerprint mismatch blocks the split",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, map[string]string{defaultFingerprintLabel: "a"}),
++			pool:    []scheduling.Endpoint{heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, map[string]string{defaultFingerprintLabel: "b"})},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "disabled prefill pod is skipped",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, map[string]string{defaultDisableLabel: "true"})},
++			produce: true,
++			want:    false,
++		},
++		{
++			name:    "no prefill view stays local",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil),
++			produce: false,
++			want:    false,
++		},
++		{
++			name:    "unprofiled decode class uses the fallback threshold",
++			tokens:  heteroPrompt,
++			decode:  heteroEndpoint("x-0", bylabel.RoleDecode, "unprofiled", 40, 0, 0.3, nil),
++			pool:    []scheduling.Endpoint{a30Idle},
++			produce: true,
++			want:    true,
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			d := newTestHeteroDecider(t, heteroLabConfig())
++			ctx := context.Background()
++			if tt.produce {
++				require.NoError(t, d.Produce(ctx, nil, append([]scheduling.Endpoint{tt.decode}, tt.pool...)))
++			}
++			assert.Equal(t, tt.want, d.disaggregate(ctx, makeRequestWithTokens(tt.tokens), tt.decode))
++		})
++	}
++}
++
++func TestHeteroPDDeciderSubtractsCachedPrefix(t *testing.T) {
++	d := newTestHeteroDecider(t, heteroLabConfig())
++	ctx := context.Background()
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, nil)
++	require.NoError(t, d.Produce(ctx, nil, []scheduling.Endpoint{decode, pool}))
++	require.True(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode))
++
++	// 1900 of 2000 tokens cached leaves 100 uncached, under minUncachedTokens.
++	decode.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1900, heteroPrompt, 1))
++	assert.False(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode))
++}
++
++func TestHeteroPDDeciderFailsSoft(t *testing.T) {
++	d := newTestHeteroDecider(t, heteroLabConfig())
++	ctx := context.Background()
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil)
++	assert.False(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), nil))
++	assert.False(t, d.disaggregate(ctx, &scheduling.InferenceRequest{}, decode))
++	decode.Put(attrprefix.PrefixCacheMatchInfoDataKey, &notPrefixCacheMatchInfo{})
++	assert.False(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode))
++}
++
++func TestHeteroPDDeciderRecordsReason(t *testing.T) {
++	d := newTestHeteroDecider(t, heteroLabConfig())
++	ctx := context.Background()
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, nil)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, nil)
++	require.NoError(t, d.Produce(ctx, nil, []scheduling.Endpoint{decode, pool}))
++
++	counter := LlmdHeteroPDDecisionCount.WithLabelValues("hetero", hetero.ReasonRemoteBetter, "true")
++	before := testutil.ToFloat64(counter)
++	require.True(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode))
++	assert.InDelta(t, before+1, testutil.ToFloat64(counter), 1e-9)
++}
++
++func TestHeteroPDDeciderFactory(t *testing.T) {
++	raw := `{
++		"ttftSLOMs": 1000,
++		"bandwidthGbps": 25,
++		"stallWeight": 0.25,
++		"acceleratorLabel": "example.com/accel",
++		"profiles": {"nvidia-a30": {"prefillTokensPerSec": 5000}}
++	}`
++	p, err := HeteroPDDeciderPluginFactory("h", json.NewDecoder(strings.NewReader(raw)), nil)
++	require.NoError(t, err)
++	d, ok := p.(*HeteroPDDecider)
++	require.True(t, ok)
++	assert.Equal(t, "h", d.TypedName().Name)
++	assert.Equal(t, HeteroPDDeciderPluginType, d.TypedName().Type)
++	assert.Equal(t, "example.com/accel", d.config.AcceleratorLabel)
++	assert.InDelta(t, 1000.0, d.config.TTFTSLOMs, 1e-9)
++	assert.Equal(t, 131072, int(d.config.KVBytesPerToken))
++	assert.InDelta(t, 5000.0, d.config.Profiles["nvidia-a30"].PrefillTokensPerSec, 1e-9)
++
++	p, err = HeteroPDDeciderPluginFactory("h", nil, nil)
++	require.NoError(t, err)
++	assert.Equal(t, defaultAcceleratorLabel, p.(*HeteroPDDecider).config.AcceleratorLabel)
++
++	for _, bad := range []string{
++		`{"acceleratorLabel": ""}`,
++		`{"bandwidthGbps": 0}`,
++		`{"safetyMargin": 1}`,
++		`{"fallbackNonCachedTokens": -1}`,
++		`{"profiles": {"x": {"prefillTokensPerSec": 0}}}`,
++		`{"bandwidthGbps": "fast"}`,
++	} {
++		_, err := HeteroPDDeciderPluginFactory("h", json.NewDecoder(strings.NewReader(bad)), nil)
++		assert.Error(t, err, bad)
++	}
++}
++
++func TestHeteroPDDeciderConsumes(t *testing.T) {
++	d := newTestHeteroDecider(t, heteroLabConfig())
++	required := d.Consumes().Required
++	assert.Contains(t, required, d.prefixMatchInfoDataKey())
++	assert.Len(t, required, 5)
++	assert.Empty(t, d.Produces())
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
+index 9e3656b..382e02c 100644
+--- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
+@@ -19,6 +19,7 @@ package disagg
+ import (
+ 	"errors"
+ 	"fmt"
++	"strconv"
+ 
+ 	"github.com/prometheus/client_golang/prometheus"
+ 	compbasemetrics "k8s.io/component-base/metrics"
+@@ -38,6 +39,16 @@ var (
+ 		},
+ 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
+ 	)
++
++	// LlmdHeteroPDDecisionCount records hetero-pd-decider outcomes by reason.
++	LlmdHeteroPDDecisionCount = prometheus.NewCounterVec(
++		prometheus.CounterOpts{
++			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
++			Name:      "hetero_pd_decision_total",
++			Help:      metricsutil.HelpMsgWithStability("Total number of hetero-pd-decider decisions by reason", compbasemetrics.ALPHA),
++		},
++		[]string{"plugin_name", "reason", "remote_prefill"},
++	)
+ )
+ 
+ func registerMetrics(registerer prometheus.Registerer) error {
+@@ -46,6 +57,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
+ 	}
+ 	for _, collector := range []prometheus.Collector{
+ 		LlmdDisaggDecisionCount,
++		LlmdHeteroPDDecisionCount,
+ 	} {
+ 		if err := registerer.Register(collector); err != nil {
+ 			var alreadyRegistered prometheus.AlreadyRegisteredError
+@@ -58,6 +70,10 @@ func registerMetrics(registerer prometheus.Registerer) error {
+ 	return nil
+ }
+ 
++func recordHeteroPDDecision(pluginName, reason string, remote bool) {
++	LlmdHeteroPDDecisionCount.WithLabelValues(pluginName, reason, strconv.FormatBool(remote)).Inc()
++}
++
+ // RecordDisaggDecision increments the counter for a disaggregation routing decision.
+ // The decisionType must be one of the metricsutil.DisaggPath* constants.
+ // The model parameter should be the target model name; if empty, "unknown" is used.

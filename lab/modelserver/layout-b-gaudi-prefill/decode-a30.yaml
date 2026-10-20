@@ -1,0 +1,108 @@
+# NVIDIA A30 decode pod behind the routing sidecar. vLLM uses FlashAttention on
+# Ampere by default; its blocks-first layout is what joint-KV staging targets.
+# Confirm the backend in the startup log ("Using FLASH_ATTN backend").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode-a30
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: decode-a30
+  template:
+    metadata:
+      labels:
+        app: decode-a30
+        llm-d.ai/inference-serving: "true"
+        llm-d.ai/guide: hetero-pd
+        llm-d.ai/role: decode
+        llm-d.ai/accelerator-class: nvidia-a30
+        llm-d.ai/model-fingerprint: llama-3.1-8b-instruct-bf16
+    spec:
+      serviceAccountName: hetero-pd
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-A30
+      initContainers:
+        - name: routing-proxy
+          image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0
+          args:
+            - --port=8000
+            - --kv-connector=nixlv2
+            - --zap-log-level=1
+            - --secure-serving=false
+          ports:
+            - name: sidecar
+              containerPort: 8000
+              protocol: TCP
+          restartPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      containers:
+        - name: modelserver
+          image: docker.io/vllm/vllm-openai:v0.26.0
+          command: ["vllm", "serve"]
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--port=8200"
+            - "--tensor-parallel-size=1"
+            - "--dtype=bfloat16"
+            - "--block-size=16"
+            - "--max-model-len=8192"
+            - "--gpu-memory-utilization=0.92"
+            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5600"
+            - name: UCX_TLS
+              value: tcp
+          ports:
+            - name: modelserver
+              containerPort: 8200
+              protocol: TCP
+            - name: nixl
+              containerPort: 5600
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "8"
+              memory: 48Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shm
+            - mountPath: /root/.cache/huggingface
+              name: hf-cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: hf-cache
+          emptyDir: {}

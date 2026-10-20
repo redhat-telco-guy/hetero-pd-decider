@@ -1,0 +1,12 @@
+# Layout A: A30 prefills, two Gaudi 3 cards decode.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+components:
+  - ../common
+resources:
+  - prefill-a30.yaml
+  - decode-gaudi3.yaml
+images:
+  - name: REPLACE_GAUDI_VLLM_IMAGE
+    newName: quay.io/REPLACE_ME/vllm-gaudi-nixl
+    newTag: v0.26.0

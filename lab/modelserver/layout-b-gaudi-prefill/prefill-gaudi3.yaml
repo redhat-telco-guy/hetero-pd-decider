@@ -1,0 +1,97 @@
+# Intel Gaudi 3 prefill pod serving a GPU decode pod. This is the direction the
+# vllm-gaudi docs describe (VLLM_HPU_NIXL_JOINT_KV). Joint-KV staging is for
+# HPU-to-GPU only, so this layout has no Gaudi decode pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prefill-gaudi3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prefill-gaudi3
+  template:
+    metadata:
+      labels:
+        app: prefill-gaudi3
+        llm-d.ai/inference-serving: "true"
+        llm-d.ai/guide: hetero-pd
+        llm-d.ai/role: prefill
+        llm-d.ai/accelerator-class: intel-gaudi3
+        llm-d.ai/model-fingerprint: llama-3.1-8b-instruct-bf16
+    spec:
+      serviceAccountName: hetero-pd
+      containers:
+        - name: modelserver
+          image: REPLACE_GAUDI_VLLM_IMAGE
+          command: ["vllm", "serve"]
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--port=8000"
+            - "--tensor-parallel-size=1"
+            - "--dtype=bfloat16"
+            - "--block-size=128"
+            - "--max-model-len=8192"
+            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","enable_permute_local_kv":true}'
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+            - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5600"
+            - name: UCX_TLS
+              value: tcp
+            - name: VLLM_HPU_HETERO_KV_LAYOUT
+              value: "true"
+            - name: VLLM_HPU_NIXL_JOINT_KV
+              value: "true"
+            - name: PT_HPU_LAZY_MODE
+              value: "1"
+            - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+              value: "120"
+          ports:
+            - name: modelserver
+              containerPort: 8000
+              protocol: TCP
+            - name: nixl
+              containerPort: 5600
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 10
+            failureThreshold: 180
+          resources:
+            requests:
+              cpu: "16"
+              memory: 96Gi
+              habana.ai/gaudi: "1"
+            limits:
+              memory: 128Gi
+              habana.ai/gaudi: "1"
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shm
+            - mountPath: /root/.cache/huggingface
+              name: hf-cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: hf-cache
+          emptyDir: {}

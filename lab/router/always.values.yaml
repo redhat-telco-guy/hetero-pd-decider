@@ -1,0 +1,35 @@
+# Every request takes the remote-prefill path. Used by scripts/correctness.py
+# to compare cross-vendor output with single-vendor output.
+router:
+  epp:
+    pluginsConfigFile: "always-pd-config.yaml"
+    pluginsCustomConfig:
+      always-pd-config.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: approx-prefix-cache-producer
+          parameters:
+            maxPrefixTokensToMatch: 16384
+            lruCapacityPerServer: 31250
+        - type: prefix-cache-scorer
+        - type: queue-scorer
+        - type: prefill-filter
+        - type: decode-filter
+        - type: max-score-picker
+        - type: disagg-profile-handler
+          parameters:
+            deciders:
+              prefill: always-disagg-pd-decider
+        - type: always-disagg-pd-decider
+        schedulingProfiles:
+        - name: prefill
+          plugins:
+          - pluginRef: prefill-filter
+          - pluginRef: max-score-picker
+          - pluginRef: queue-scorer
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+          - pluginRef: max-score-picker
+          - pluginRef: queue-scorer

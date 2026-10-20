@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  decision-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Test decision core
+        working-directory: plugin/src/hetero
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -v -cover ./...
+
+  lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check scripts
+        run: |
+          pip install -r lab/scripts/requirements.txt pyyaml
+          python -m py_compile lab/scripts/*.py
+          bash -n lab/scripts/*.sh
+      - name: Build Kustomize layouts
+        run: |
+          for l in lab/modelserver/layout-*; do
+            echo "== $l"
+            kubectl kustomize "$l" > /dev/null
+          done
+
+  llm-d-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch applies to the pinned llm-d commit
+        run: |
+          git clone https://github.com/llm-d/llm-d-inference-scheduler.git upstream
+          cd upstream
+          git checkout "$(cat ../plugin/llm-d-patch/BASE_COMMIT)"
+          git apply --check ../plugin/llm-d-patch/hetero-pd-decider.patch
+          git apply ../plugin/llm-d-patch/hetero-pd-decider.patch
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: upstream/go.mod
+      - name: Test the plugin inside llm-d
+        working-directory: upstream
+        run: go test ./pkg/epp/framework/plugins/scheduling/profilehandler/disagg/... ./cmd/epp/...

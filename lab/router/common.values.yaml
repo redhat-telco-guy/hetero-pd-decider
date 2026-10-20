@@ -1,0 +1,22 @@
+# Shared router values. Layer one of the decider files on top:
+#   helm install hetero-pd oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+#     -f common.values.yaml -f hetero.values.yaml -n hetero-pd-lab
+router:
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
+  epp:
+    replicas: 1
+    # The EPP image built from the llm-d-inference-scheduler branch with hetero-pd-decider.
+    image:
+      registry: quay.io/REPLACE_ME
+      repository: llm-d-router-endpoint-picker
+      tag: hetero-pd-dev
+      pullPolicy: Always
+    flags:
+      v: 4   # DEBUG: logs one "hetero-pd-decider decision" line per request
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: "hetero-pd"
