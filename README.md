@@ -21,14 +21,15 @@ The stock `prefix-based-pd-decider` solves a narrower **routing** problem: if th
 
 ```mermaid
 flowchart LR
-    R["Request"] --> D["llm-d selects a decode pod"]
-    D --> T{"Uncached prompt\nlonger than N tokens?"}
-    T -- "Yes" --> P["Remote prefill pool"]
+    R["Request"] --> D["llm-d selects\na decode pod"]
+    D --> T{"Prompt longer\nthan N tokens?"}
+    T -- "Yes" --> P["Remote prefill"]
     P --> K["Transfer KV cache"]
-    K --> G["Selected decode pod\ndecode"]
-    T -- "No" --> L["Selected decode pod\nprefill + decode locally"]
-    X["One static rule\nNo queue, link, hardware, capacity,\nor active-stream awareness"] -. "cannot influence the choice" .-> T
+    K --> G["Decode"]
+    T -- "No" --> L["Prefill + decode\nlocally"]
 ```
+
+<sub>Fixed threshold only: it does not consider queue depth, link health, accelerator type, KV-cache headroom, or active decode streams.</sub>
 
 This is a sensible default when the two pools are identical and lightly loaded. It becomes inefficient when the pool is heterogeneous or traffic is bursty.
 
@@ -37,19 +38,16 @@ This is a sensible default when the two pools are identical and lightly loaded. 
 After llm-d has selected the decode pod, `hetero-pd-decider` evaluates the two feasible paths for that specific request.
 
 ```mermaid
-flowchart TD
-    R["Request"] --> D["llm-d selects the decode pod"]
+flowchart LR
+    R["Request"] --> D["llm-d selects\na decode pod"]
     D --> H["hetero-pd-decider"]
-    H --> M["Estimate remote path\nremote prefill rate + queue + KV transfer"]
-    H --> L["Estimate local path\nlocal prefill rate + queue + active-stream stall"]
-    M --> S{"Safety and SLO checks\npass?"}
-    L --> S
-    S -- "Remote is safe and\nbetter for this request" --> P["Remote prefill"]
-    P --> K["Transfer KV cache"]
-    K --> G["Chosen decode pod\ndecode"]
-    S -- "Otherwise" --> Q["Chosen decode pod\nprefill + decode locally"]
-    H -. "model build, KV headroom,\nlink health, profiles, opt-out labels" .-> S
+    H --> E["Compare two paths\nTTFT + active-stream impact"]
+    E --> S{"Remote path\nsafe and better?"}
+    S -- "Yes" --> P["Remote prefill\n→ KV transfer → decode"]
+    S -- "No" --> L["Local prefill\n+ decode"]
 ```
+
+<sub>Safety gate: model identity, KV-cache headroom, link health, measured profiles, SLO, and operator opt-out labels.</sub>
 
 The plugin therefore balances two experiences:
 
@@ -79,17 +77,39 @@ The first four scenarios change **where one request is prefetched**. Scenario 5 
 
 ```mermaid
 flowchart TD
-    A["Per-request routing\nmilliseconds"] --> S1["1. Fixed pools, same hardware\nUse queue and link awareness"]
-    A --> S2["2. Fixed pools, different vendors\nBalance TTFT against decode-stream stutter"]
-    A --> S3["3. Gaudi pods can prefill\nfor each other"]
-    A --> S4["4. Several prefill-pool types\nChoose the best eligible source"]
+    subgraph REQUEST["Per-request routing · milliseconds"]
+        direction LR
+        R["Decision engine"] --> S1["1 · Same hardware\nQueue + link aware"]
+        R --> S2["2 · Different vendors\nTTFT + stream-stutter aware"]
+        R --> S3["3 · Decode pods\nalso help prefill"]
+        R --> S4["4 · Multiple prefill types\nPick the best eligible source"]
+    end
 
-    B["Capacity control\nminutes"] --> S5["5. Pool sizes change over time\nResize or re-role the cluster"]
+    subgraph FLEET["Fleet capacity · minutes"]
+        direction LR
+        C["Ratio controller"] --> S5["5 · Resize or re-role\nprefill and decode capacity"]
+    end
 
-    C["Policy and guardrails"] --> S6["6. Cost mode\nChoose the cheapest SLO-safe path"]
-    C --> S7["7. Degraded path\nForce a safe local path"]
-    C --> S8["8. Missing data\nFall back to the stock rule"]
+    subgraph POLICY["Policy and guardrails"]
+        direction LR
+        P["Policy engine"] --> S6["6 · Cost mode\nCheapest SLO-safe path"]
+        P --> S7["7 · Degraded path\nForce local"]
+        P --> S8["8 · Missing data\nUse the stock rule"]
+    end
 ```
+
+### Scenario quick reference
+
+| # | Scenario | What the plugin decides | Why it matters | Delivery status |
+| ---: | --- | --- | --- | --- |
+| 1 | Fixed pools, same hardware | Use remote prefill only when queue and link conditions still make it worthwhile. | Avoids needless remote waits during bursts or network congestion. | Current scope |
+| 2 | Fixed pools, A30 prefill + Gaudi decode | Balance remote TTFT against the stall that local prefill would impose on active Gaudi streams. | Protects live conversations while meeting the new user's TTFT SLO. | Current scope |
+| 3 | Gaudi pods prefill for each other | Compare the A30, an idle Gaudi, and local prefill as specific sources. | Uses idle Gaudi capacity and avoids a queued A30. | Planned interface evolution |
+| 4 | Several prefill pools of different types | Choose the source with the best safe predicted TTFT after queueing and transfer cost. | The fastest accelerator is not always the fastest end-to-end path. | Planned interface evolution |
+| 5 | Pool sizes change over time | Resize or re-role prefill and decode capacity from observed traffic mix. | Turns request-level routing into durable fleet cost savings. | Future control-plane capability |
+| 6 | Cost mode | When several paths meet the SLO, choose the lower-cost eligible path. | Frees premium decode capacity without reducing user experience. | Future policy mode |
+| 7 | Degraded or unsafe path | Reject the handoff and keep the request local. | Prevents incorrect output, KV-cache exhaustion, and latency failures. | Current safety behavior |
+| 8 | Missing profiles or metrics | Use llm-d's stock fixed-threshold decision rather than guessing. | Enables incremental rollout with a safe fallback. | Current fallback behavior |
 
 ### 1. Fixed pools, same hardware
 
@@ -147,10 +167,10 @@ For a 2,000-token prompt, assume an A30 prefill rate of about 5,000 tokens/s, a 
 
 ```mermaid
 flowchart LR
-    A["Traffic mix changes"] --> B["Controller\nminutes"]
-    B --> C["Resize or re-role\nprefill and decode capacity"]
-    C --> D["hetero-pd-decider\nmilliseconds"]
-    D --> E["Absorb request-level\nbursts between resizes"]
+    A["Traffic mix\nchanges"] --> B["Ratio controller\nminutes"]
+    B --> C["Prefill : decode\ncapacity ratio"]
+    C --> D["Request decider\nmilliseconds"]
+    D --> E["Absorbs bursts\nbetween resizes"]
 ```
 
 During the day, chat traffic can be decode-heavy; the controller adds Gaudi decode capacity. At night, a long-prompt summarization workload can justify more inexpensive prefill capacity. In a fixed lab, it cannot add hardware, but it can recommend the right purchase ratio or re-role eligible Gaudi pods.
@@ -190,10 +210,10 @@ During the day, chat traffic can be decode-heavy; the controller adds Gaudi deco
 
 ```mermaid
 flowchart LR
-    A["NIXL / runtime connector"] --> B["KV handoff is\ntechnically possible"]
+    A["NIXL / runtime connector"] --> B["KV handoff\nis possible"]
     B --> C["hetero-pd-decider"]
-    C --> D["Choose when handoff\nimproves the service"]
-    D --> E["Protect active streams\nMeet TTFT SLOs\nUse capacity efficiently\nFail safe"]
+    C --> D["Handoff only when\nit is safe and beneficial"]
+    D --> E["Better TTFT\nSmoother streams\nSafe fallback"]
 ```
 
 The plugin is deliberately **not** a replacement for llm-d, vLLM, NIXL, or accelerator vendors' runtime plugins. It is the decision layer between **“a KV handoff is technically possible”** and **“this handoff is the best safe choice for this request right now.”**
