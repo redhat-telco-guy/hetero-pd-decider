@@ -18,7 +18,7 @@ spec:
         llm-d.ai/guide: hetero-pd
         llm-d.ai/role: decode
         llm-d.ai/accelerator-class: nvidia-a30
-        llm-d.ai/model-fingerprint: llama-3.1-8b-instruct-bf16
+        llm-d.ai/model-fingerprint: qwen2.5-7b-instruct-bf16
     spec:
       serviceAccountName: hetero-pd
       nodeSelector:
@@ -44,7 +44,7 @@ spec:
           image: docker.io/vllm/vllm-openai:v0.26.0
           command: ["vllm", "serve"]
           args:
-            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "Qwen/Qwen2.5-7B-Instruct"
             - "--port=8200"
             - "--tensor-parallel-size=1"
             - "--dtype=bfloat16"

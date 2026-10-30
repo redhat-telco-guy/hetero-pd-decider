@@ -8,7 +8,7 @@ the single-vendor reference (it prefills and decodes locally):
   oc port-forward svc/hetero-pd-epp 8081:80 &
   oc port-forward deploy/decode-gaudi3 18200:8200 &
   python correctness.py --router http://localhost:8081 --reference http://localhost:18200 \
-      --model meta-llama/Llama-3.1-8B-Instruct --prompts 200
+      --model Qwen/Qwen2.5-7B-Instruct --prompts 200
 
 Greedy decoding on both paths. BF16 rounding differs between vendors, so long
 outputs can drift; the pass bar is identical output for the first 64 tokens on

@@ -1,0 +1,109 @@
+{
+  "updated": "2026-10-27T20:14:00Z",
+  "cluster": "ai154 (OpenShift 4.22.18)",
+  "model": "Qwen/Qwen2.5-7B-Instruct (bf16)",
+  "hardware": [
+    {
+      "node": "worker1",
+      "device": "NVIDIA A30 #1",
+      "role": "prefill",
+      "status": "ok",
+      "note": "prefill-a30, vLLM v0.26.0, 118,016-token KV cache"
+    },
+    {
+      "node": "worker1",
+      "device": "NVIDIA A30 #2",
+      "role": "decode (stand-in)",
+      "status": "ok",
+      "note": "decode-a30, used while the Gaudi node is down"
+    },
+    {
+      "node": "worker2",
+      "device": "Intel Gaudi 3 (c9:00.0)",
+      "role": "decode",
+      "status": "down",
+      "note": "Overheated 19:16 UTC, node rebooted 19:22, card no longer on PCI bus. Reported to lab owner."
+    },
+    {
+      "node": "worker2",
+      "device": "Intel Gaudi 3 (15:00.0)",
+      "role": "-",
+      "status": "down",
+      "note": "DRAM initialization fails on every boot. RMA requested."
+    }
+  ],
+  "milestones": [
+    {
+      "step": "Operators (NFD, NVIDIA, Intel Gaudi, KMM)",
+      "status": "done"
+    },
+    {
+      "step": "Router image with hetero-pd-decider: vet + 33 tests pass",
+      "status": "done"
+    },
+    {
+      "step": "Gaudi vLLM + NIXL image (transformers pinned)",
+      "status": "done"
+    },
+    {
+      "step": "Gaudi decode engine up (47 GiB KV, hetero NIXL connector)",
+      "status": "done"
+    },
+    {
+      "step": "Router routes A30 prefill -> remote decode end to end",
+      "status": "done"
+    },
+    {
+      "step": "KV cache transfers over NIXL confirmed (A30 -> A30), 2 to 5 ms each",
+      "status": "done"
+    },
+    {
+      "step": "Correctness gate, A30 -> A30: 91% identical, under the 95% bar",
+      "status": "review"
+    },
+    {
+      "step": "Correctness gate, A30 -> Gaudi 3 (cross-vendor)",
+      "status": "blocked"
+    },
+    {
+      "step": "Measure prefill profiles and link bandwidth",
+      "status": "pending"
+    },
+    {
+      "step": "A/B: hetero-pd-decider vs stock prefix-based decider",
+      "status": "pending"
+    },
+    {
+      "step": "Force and check each decision reason",
+      "status": "pending"
+    }
+  ],
+  "correctness": [
+    {
+      "layout": "A30 -> A30",
+      "prompts": 200,
+      "compared": 200,
+      "identical": 182,
+      "passBar": 0.95,
+      "status": "fail",
+      "note": "182 of 200 identical in the first 64 tokens. KV really moved: the decode pod's external prefix-cache hits went from 0 to 1,751 and NIXL logged successful transfers. The test prompts are random word lists; most divergences start at the first word, where near-tied tokens flip. Next: rerun with real-text prompts to separate rounding from a transfer fault."
+    },
+    {
+      "layout": "A30 -> Gaudi 3",
+      "prompts": 200,
+      "compared": null,
+      "identical": null,
+      "passBar": 0.95,
+      "status": "blocked",
+      "note": "Waiting on worker2 repair."
+    }
+  ],
+  "ab": [],
+  "decisions": [],
+  "profiles": {
+    "measured": false,
+    "nvidia-a30": 5000,
+    "intel-gaudi3": 20000,
+    "bandwidthGbps": 10
+  }
+}

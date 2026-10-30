@@ -7,7 +7,7 @@ Three request classes run together:
   burst  B long prompts sent at once at a fixed time
 
   oc port-forward svc/hetero-pd-epp 8081:80 &     # or the router route
-  python loadtest.py --url http://localhost:8081 --model meta-llama/Llama-3.1-8B-Instruct \
+  python loadtest.py --url http://localhost:8081 --model Qwen/Qwen2.5-7B-Instruct \
       --out run-hetero.csv
 
 Run the same command (same --seed) under each router config, then compare.py.

@@ -1,0 +1,80 @@
+# Hetero-PD dashboard: a small Python server (UBI 9) that serves the page and a live
+# feed scraped from the router and the model servers. Page files come from the
+# ConfigMap hetero-pd-dashboard-web, created by lab/scripts/25-dashboard.sh.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hetero-pd-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hetero-pd-dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hetero-pd-dashboard
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: hetero-pd-dashboard}
+subjects:
+  - {kind: ServiceAccount, name: hetero-pd-dashboard}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hetero-pd-dashboard
+  labels: {app: hetero-pd-dashboard}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: hetero-pd-dashboard}
+  template:
+    metadata:
+      labels: {app: hetero-pd-dashboard}
+    spec:
+      serviceAccountName: hetero-pd-dashboard
+      affinity:
+        nodeAffinity:   # keep off worker2 until it is repaired
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/hostname, operator: NotIn, values: ["worker2.ai154.dl154.dfw.ocp.run"]}
+                  - {key: node-role.kubernetes.io/worker, operator: Exists}
+      containers:
+        - name: dashboard
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command: ["python3", "-u", "/app/server.py"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: app, mountPath: /app/server.py, subPath: server.py}
+            - {name: web, mountPath: /app/web}
+      volumes:
+        - name: app
+          configMap: {name: hetero-pd-dashboard-web, items: [{key: server.py, path: server.py}]}
+        - name: web
+          configMap: {name: hetero-pd-dashboard-web, items: [{key: index.html, path: index.html}, {key: results.json, path: results.json}]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hetero-pd-dashboard
+spec:
+  selector: {app: hetero-pd-dashboard}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: hetero-pd-dashboard
+spec:
+  to: {kind: Service, name: hetero-pd-dashboard}
+  port: {targetPort: http}
+  tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}

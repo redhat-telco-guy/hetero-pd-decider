@@ -18,7 +18,7 @@ spec:
         llm-d.ai/guide: hetero-pd
         llm-d.ai/role: prefill
         llm-d.ai/accelerator-class: intel-gaudi3
-        llm-d.ai/model-fingerprint: llama-3.1-8b-instruct-bf16
+        llm-d.ai/model-fingerprint: qwen2.5-7b-instruct-bf16
     spec:
       serviceAccountName: hetero-pd
       containers:
@@ -26,7 +26,7 @@ spec:
           image: REPLACE_GAUDI_VLLM_IMAGE
           command: ["vllm", "serve"]
           args:
-            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "Qwen/Qwen2.5-7B-Instruct"
             - "--port=8000"
             - "--tensor-parallel-size=1"
             - "--dtype=bfloat16"

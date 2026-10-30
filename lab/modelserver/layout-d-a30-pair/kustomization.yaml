@@ -1,0 +1,9 @@
+# Layout D (temporary, while worker2's Gaudi cards are down): A30 prefills, the second A30 decodes.
+# Validates the router, the decider and the NIXL remote-prefill path end to end on one vendor.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+components:
+  - ../common
+resources:
+  - prefill-a30.yaml
+  - decode-a30.yaml

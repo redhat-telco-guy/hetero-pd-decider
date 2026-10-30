@@ -3,3 +3,21 @@ __pycache__/
 *.csv
 .venv/
 .pytest_cache/
+
+# local-only: caches, backups, raw run output (kept on the laptop, not in git)
+.DS_Store
+.cache/
+_to_delete/
+.thermal-*
+/*.txt
+/*.log
+/*.zip
+/*.json
+/thermal-test-*/
+/install-dashboard-v2.sh
+/lab-archive/*.tgz
+/lab-archive/*.zip
+/lab-archive/*.pdf
+/lab-archive/*.docx
+/lab-archive/*/*
+!/lab-archive/*/results/

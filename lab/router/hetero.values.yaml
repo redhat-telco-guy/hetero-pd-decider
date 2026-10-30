@@ -23,7 +23,7 @@ router:
               prefill: hetero-pd-decider
         - type: hetero-pd-decider
           parameters:
-            kvBytesPerToken: 131072        # Llama-3.1-8B, bf16
+            kvBytesPerToken: 57344         # Qwen2.5-7B bf16: 2 x 28 layers x 4 KV heads x 128 dim x 2 B (Llama-3.1-8B was 131072)
             ttftSLOMs: 1000
             stallWeight: 0.25
             safetyMargin: 0.1

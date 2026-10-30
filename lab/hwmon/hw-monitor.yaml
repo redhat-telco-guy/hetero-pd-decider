@@ -1,0 +1,39 @@
+# hw-monitor: read-only hardware readings on every worker, for the dashboard's live hardware panel.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: hw-monitor}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: hw-monitor, labels: {app: hw-monitor}}
+spec:
+  selector: {matchLabels: {app: hw-monitor}}
+  template:
+    metadata: {labels: {app: hw-monitor}}
+    spec:
+      serviceAccountName: hw-monitor
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: {node-role.kubernetes.io/worker: ""}
+      tolerations: [{operator: Exists}]
+      containers:
+        - name: collector
+          image: registry.fedoraproject.org/fedora:41
+          command: ["bash", "-c"]
+          args:
+            - dnf -y -q install python3 ipmitool pciutils dmidecode ethtool >/dev/null 2>&1 || echo "package install failed";
+              exec python3 -u /app/collector.py
+          env:
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+            - {name: PORT, value: "9477"}
+          ports: [{name: http, containerPort: 9477}]
+          readinessProbe: {tcpSocket: {port: 9477}, initialDelaySeconds: 20, periodSeconds: 10}
+          securityContext: {privileged: true, runAsUser: 0}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: host, mountPath: /host}
+            - {name: app, mountPath: /app}
+      volumes:
+        - {name: host, hostPath: {path: /}}
+        - {name: app, configMap: {name: hw-monitor}}

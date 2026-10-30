@@ -1,0 +1,22 @@
+
+/* ---- live hardware panel (Stack tab) ---- */
+.hwhead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline}
+.hwgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:16px}
+.mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
+@media (max-width:560px){.mini{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.mini div{border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0}
+.mini b{display:block;font-family:var(--f-display);font-size:1.45rem;line-height:1.1;font-variant-numeric:tabular-nums}
+.mini span{font-size:.78rem;color:var(--muted)}
+.hwsec{font:600 .74rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:14px 0 4px}
+.hbar{height:6px;background:var(--grid);border-radius:3px;position:relative;min-width:70px}
+.hbar>i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--ok)}
+.hbar>i.w{background:var(--warn)} .hbar>i.b{background:var(--bad)}
+.issues{margin:8px 0 0;padding-left:1.1rem;display:flex;flex-direction:column;gap:3px;font-size:.92rem}
+.hwgrid td,.hwgrid th{padding:5px 6px}
+details.hw{margin-top:8px;font-size:.86rem} details.hw summary{cursor:pointer;color:var(--muted)}
+details.hw pre{white-space:pre-wrap;font:.76rem/1.4 var(--f-mono);background:var(--bg);padding:8px;border-radius:6px;max-height:16rem;overflow:auto}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px}
+.chart{position:relative} .chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart .tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:.78rem;box-shadow:0 2px 8px rgb(0 0 0/.12);white-space:nowrap}
+.lgd{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.8rem;color:var(--muted);margin:2px 0 6px}
+.lgd i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}

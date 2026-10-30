@@ -44,6 +44,7 @@ const (
 // Throughputs are placeholders, not measurements.
 func heteroLabConfig() HeteroPDDeciderConfig {
 	c := defaultHeteroPDDeciderConfig()
+	c.Strategy = hetero.StrategyModel // these tests exercise the cost model directly
 	c.TTFTSLOMs = 1000
 	c.BandwidthGbps = 25
 	c.Profiles = map[string]hetero.Profile{
@@ -271,4 +272,8 @@ func TestHeteroPDDeciderConsumes(t *testing.T) {
 	assert.Contains(t, required, d.prefixMatchInfoDataKey())
 	assert.Len(t, required, 5)
 	assert.Empty(t, d.Produces())
+}
+
+func TestHeteroPDDeciderDefaultsToAuto(t *testing.T) {
+	assert.Equal(t, hetero.StrategyAuto, defaultHeteroPDDeciderConfig().Strategy)
 }

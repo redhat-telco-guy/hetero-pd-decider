@@ -11,12 +11,16 @@ router:
     replicas: 1
     # The EPP image built from the llm-d-inference-scheduler branch with hetero-pd-decider.
     image:
-      registry: quay.io/REPLACE_ME
+      registry: image-registry.openshift-image-registry.svc:5000/hetero-pd-lab
       repository: llm-d-router-endpoint-picker
       tag: hetero-pd-dev
       pullPolicy: Always
     flags:
       v: 4   # DEBUG: logs one "hetero-pd-decider decision" line per request
+      allow-experimental-plugins: true   # hetero-pd-decider registers as Alpha
+  # No InferencePool CRD on this cluster: EPP selects pods by the labels below.
+  inferencePool:
+    create: false
   modelServers:
     matchLabels:
       llm-d.ai/guide: "hetero-pd"

@@ -1,0 +1,16 @@
+  <section id="stack" role="tabpanel" aria-labelledby="t-stack" class="stack" hidden>
+    <div class="panel" id="hwPanel">
+      <div class="hwhead"><h2 style="margin:0">Hardware health, live</h2><span><span class="pill p-idle" id="hwState">Loading…</span> <span class="small muted" id="hwAge"></span></span></div>
+      <p class="muted small" style="margin:6px 0 0">Fans, temperatures, power and network cards on each server, read from the server's own management controller (BMC) and the card drivers. Refreshes every 5 seconds. Read-only: nothing here changes the servers. Gaudi readings come from the safety watchdog, which stops Gaudi work at 80 °C.</p>
+      <ul class="issues" id="hwIssues"></ul>
+    </div>
+    <div class="hwgrid" id="hwNodes"></div>
+    <div class="panel">
+      <h2>Last hour</h2>
+      <div class="charts">
+        <div><h3>Card temperature (°C)</h3><div class="lgd" id="lgTemp"></div><div class="chart" id="chTemp"></div></div>
+        <div><h3>Server power (W)</h3><div class="lgd" id="lgPow"></div><div class="chart" id="chPow"></div></div>
+        <div><h3>Fan speed (average RPM)</h3><div class="lgd" id="lgFan"></div><div class="chart" id="chFan"></div></div>
+        <div><h3>Fan control setting (%)</h3><div class="lgd" id="lgZone"></div><div class="chart" id="chZone"></div></div>
+      </div>
+    </div>

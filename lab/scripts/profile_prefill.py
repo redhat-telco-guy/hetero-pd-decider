@@ -5,7 +5,7 @@ Hit each engine directly (not the router), one at a time, with no other load:
 
   oc port-forward deploy/prefill-a30 18000:8000 &
   oc port-forward deploy/decode-gaudi3 18200:8200 &      # the engine port, not the sidecar
-  python profile_prefill.py --model meta-llama/Llama-3.1-8B-Instruct \
+  python profile_prefill.py --model Qwen/Qwen2.5-7B-Instruct \
       --target nvidia-a30=http://localhost:18000 \
       --target intel-gaudi3=http://localhost:18200
 

@@ -36,7 +36,7 @@ The router config is the same for every layout; only `profiles` change.
 - OpenShift with the NVIDIA GPU Operator (A30 node) and the Intel Gaudi Base Operator (Gaudi node), in one cluster.
 - `oc`/`kubectl`, `helm` 3.14+, `podman`, `git`, Python 3.10+ with `pip install -r scripts/requirements.txt`.
 - A registry you can push to (examples use `quay.io/<you>`).
-- A Hugging Face token with access to `meta-llama/Llama-3.1-8B-Instruct`.
+- A Hugging Face token (only needed for gated models; Qwen/Qwen2.5-7B-Instruct is open). Lab switched from Llama-3.1-8B while Meta access is pending.
 
 ```bash
 cd lab   # from the repository root
@@ -103,7 +103,7 @@ helm install hetero-pd oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
 oc port-forward -n $NS svc/hetero-pd-epp 8081:80 &
 cd $KIT/scripts
 python correctness.py --router http://localhost:8081 --reference http://localhost:18200 \
-  --model meta-llama/Llama-3.1-8B-Instruct --prompts 200
+  --model Qwen/Qwen2.5-7B-Instruct --prompts 200
 ```
 
 Pass: identical 64-token output on at least 95% of prompts. Also check the decode pod logs show the KV was received, not recomputed (`oc logs deploy/decode-gaudi3 -c modelserver | grep -i nixl`), and the decode's `vllm:external_prefix_cache_hits_total` metric rises during the run.
@@ -115,7 +115,7 @@ If it fails, see Troubleshooting. If layout A cannot pass, switch to layout B (`
 Run with no other traffic.
 
 ```bash
-python profile_prefill.py --model meta-llama/Llama-3.1-8B-Instruct \
+python profile_prefill.py --model Qwen/Qwen2.5-7B-Instruct \
   --target nvidia-a30=http://localhost:18000 --target intel-gaudi3=http://localhost:18200
 ./measure_link.sh <a30-node> <gaudi-node> $NS
 ```
@@ -129,11 +129,11 @@ Same workload and seed under each config. Each run takes about 6 minutes includi
 ```bash
 helm upgrade hetero-pd oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
   -f $KIT/router/common.values.yaml -f $KIT/router/stock.values.yaml -n $NS
-python loadtest.py --url http://localhost:8081 --model meta-llama/Llama-3.1-8B-Instruct --out run-stock.csv
+python loadtest.py --url http://localhost:8081 --model Qwen/Qwen2.5-7B-Instruct --out run-stock.csv
 
 helm upgrade hetero-pd oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
   -f $KIT/router/common.values.yaml -f $KIT/router/hetero.values.yaml -n $NS
-python loadtest.py --url http://localhost:8081 --model meta-llama/Llama-3.1-8B-Instruct --out run-hetero.csv
+python loadtest.py --url http://localhost:8081 --model Qwen/Qwen2.5-7B-Instruct --out run-hetero.csv
 
 python compare.py stock=run-stock.csv hetero=run-hetero.csv
 ./decisions.sh hetero-pd $NS

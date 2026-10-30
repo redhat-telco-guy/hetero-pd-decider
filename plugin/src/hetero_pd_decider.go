@@ -270,10 +270,12 @@ func (d *HeteroPDDecider) disaggregate(ctx context.Context, request *scheduling.
 
 	if v := logger.V(logging.DEBUG); v.Enabled() {
 		v.Info("hetero-pd-decider decision",
-			"remote", decision.Remote, "reason", decision.Reason, "fallback", decision.Fallback,
+			"remote", decision.Remote, "reason", decision.Reason, "strategy", decision.Strategy,
+			"fallback", decision.Fallback,
 			"uncachedTokens", uncached, "prefillPod", decision.Prefill,
 			"remoteSeconds", decision.RemoteSeconds, "localSeconds", decision.LocalSeconds,
-			"stallSeconds", decision.StallSeconds, "transferSeconds", decision.TransferSeconds)
+			"stallSeconds", decision.StallSeconds, "transferSeconds", decision.TransferSeconds,
+			"handoffSeconds", decision.HandoffSeconds)
 	}
 	return decision.Remote
 }

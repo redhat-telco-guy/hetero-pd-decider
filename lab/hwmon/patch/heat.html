@@ -1,0 +1,20 @@
+      <ul class="issues" id="hwIssues"></ul>
+    </div>
+    <div class="panel" id="heatPanel">
+      <h2>Heat test</h2>
+      <p class="muted small" style="margin:0 0 10px">Puts steady work straight onto the cards (not through the router) so you can watch temperatures and fans react below. For Gaudi, the model server is started first (several minutes of loading and warm-up) and scaled back to 0 when the test ends. Safety: the test stops itself at 78 °C on a Gaudi and a few degrees below an A30's slowdown point; the watchdog still stops everything at 80 °C.</p>
+      <div class="presets" style="align-items:center">
+        <label class="small">Cards
+          <select class="btn" id="heatTarget"><option value="a30">A30 only</option><option value="gaudi">Gaudi 3 only</option><option value="both">A30 and Gaudi 3 together</option></select></label>
+        <label class="small" id="heatCardsL">Gaudi cards
+          <select class="btn" id="heatCards"><option value="1">1</option><option value="2">2</option></select></label>
+        <label class="small">Requests at a time, per card
+          <select class="btn" id="heatUsers"><option>1</option><option selected>2</option><option>4</option><option>8</option><option>16</option></select></label>
+        <label class="small">Minutes
+          <select class="btn" id="heatMin"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>10</option></select></label>
+        <button class="btn" id="heatGo">Start heat test</button>
+        <button class="btn" id="heatStop" hidden>Stop now</button>
+      </div>
+      <div class="small" id="heatStatus"></div>
+      <div class="err" id="heatErr"></div>
+    </div>

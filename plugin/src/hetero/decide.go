@@ -35,6 +35,31 @@ const (
 	ReasonNoPrefillCandidate = "no-prefill-candidate"
 	ReasonSLOMiss            = "remote-misses-slo"
 	ReasonMissingProfile     = "missing-profile"
+	// ReasonStockSplit and ReasonStockKeep are the stock threshold's own outcomes under
+	// the guarded-stock strategy; ReasonIdleVeto is the guard overruling a stock split.
+	ReasonStockSplit = "stock-split"
+	ReasonStockKeep  = "stock-keep"
+	ReasonIdleVeto   = "idle-veto"
+	// ReasonOverrideKeep and ReasonOverrideMove are the auto strategy overruling the
+	// stock rule because the other path is cheaper by at least OverrideMargin.
+	ReasonOverrideKeep = "override-keep"
+	ReasonOverrideMove = "override-move"
+)
+
+// Strategy values select how Decide reaches a decision.
+const (
+	// StrategyModel compares the remote and local estimates for every request.
+	StrategyModel = "model"
+	// StrategyGuardedStock applies the stock rule (split when the uncached tokens reach
+	// StockNonCachedTokens) and only overrules a split the estimates show cannot help:
+	// the decode pod is idle and local prefill is no slower, its KV cache is full, it is
+	// disabled, or no prefill pod can take the request. It never adds a split stock would not make.
+	StrategyGuardedStock = "guarded-stock"
+	// StrategyAuto (default) starts from the stock rule's answer and overrules it, in either
+	// direction, only when the estimates show the other path is cheaper by at least
+	// OverrideMargin and, for a move, meets the TTFT SLO. Without profiles for the decode
+	// pod and a prefill candidate, the stock answer stands.
+	StrategyAuto = "auto"
 )
 
 // Profile is the measured prefill throughput of one accelerator class
@@ -65,6 +90,25 @@ type Config struct {
 	SameClassBandwidthGbps float64 `json:"sameClassBandwidthGbps"`
 	// AvgQueuedPromptTokens estimates the prefill work behind each waiting request.
 	AvgQueuedPromptTokens int `json:"avgQueuedPromptTokens"`
+	// HandoffOverheadMs is the fixed cost of the remote path beyond the KV transfer itself:
+	// the decode sidecar's request to the prefill pod, its scheduling and response, and the
+	// decode pod fetching the KV. Lab measurements put it near 300 ms. Zero adds nothing.
+	HandoffOverheadMs float64 `json:"handoffOverheadMs"`
+	// StallFraction is the share of a local prefill's time that the decode pod's running
+	// streams actually lose, in [0, 1]. 1 models a full freeze. With chunked prefill the
+	// streams keep decoding between chunks and lose only a small part of it.
+	StallFraction float64 `json:"stallFraction"`
+	// Strategy is StrategyAuto (default; empty means auto), StrategyModel or StrategyGuardedStock.
+	Strategy string `json:"strategy"`
+	// StockNonCachedTokens is the stock threshold the guarded-stock strategy applies.
+	StockNonCachedTokens int `json:"stockNonCachedTokens"`
+	// IdleRunningRequests is the most running streams at which the guarded-stock strategy
+	// treats the decode pod as idle: with nothing to protect, a split that is not faster
+	// than local prefill is overruled.
+	IdleRunningRequests int `json:"idleRunningRequests"`
+	// OverrideMargin is how much cheaper, as a fraction in [0, 1), the other path must be
+	// before the auto strategy overrules the stock rule.
+	OverrideMargin float64 `json:"overrideMargin"`
 	// Profiles maps accelerator class to its prefill throughput.
 	Profiles map[string]Profile `json:"profiles"`
 }
@@ -80,6 +124,12 @@ func DefaultConfig() Config {
 		MinUncachedTokens:     256,
 		BandwidthGbps:         10,
 		AvgQueuedPromptTokens: 1024,
+		HandoffOverheadMs:     0,
+		StallFraction:         1,
+		Strategy:              StrategyAuto,
+		OverrideMargin:        0.25,
+		StockNonCachedTokens:  1024,
+		IdleRunningRequests:   2,
 		Profiles:              map[string]Profile{},
 	}
 }
@@ -105,6 +155,18 @@ func (c Config) Validate() error {
 		return errors.New("sameClassBandwidthGbps cannot be negative")
 	case c.AvgQueuedPromptTokens < 0:
 		return errors.New("avgQueuedPromptTokens cannot be negative")
+	case c.HandoffOverheadMs < 0:
+		return errors.New("handoffOverheadMs cannot be negative")
+	case c.StallFraction < 0 || c.StallFraction > 1:
+		return errors.New("stallFraction must be in [0, 1]")
+	case c.Strategy != "" && c.Strategy != StrategyModel && c.Strategy != StrategyGuardedStock && c.Strategy != StrategyAuto:
+		return fmt.Errorf("strategy must be %q, %q or %q", StrategyModel, StrategyGuardedStock, StrategyAuto)
+	case c.StockNonCachedTokens <= 0:
+		return errors.New("stockNonCachedTokens must be positive")
+	case c.IdleRunningRequests < 0:
+		return errors.New("idleRunningRequests cannot be negative")
+	case c.OverrideMargin < 0 || c.OverrideMargin >= 1:
+		return errors.New("overrideMargin must be in [0, 1)")
 	}
 	for class, p := range c.Profiles {
 		if p.PrefillTokensPerSec <= 0 {
@@ -130,12 +192,16 @@ type Pod struct {
 // Decision is the outcome for one request. Seconds fields are zero when not estimated.
 type Decision struct {
 	Remote bool
+	// Strategy is the strategy that produced the decision.
+	Strategy string
 	// Fallback is set when the inputs cannot be estimated; the caller applies its default rule.
 	Fallback bool
 	Reason   string
 	// Prefill names the prefill pod the estimate used when Remote is set.
-	Prefill         string
-	RemoteSeconds   float64
+	Prefill       string
+	RemoteSeconds float64
+	// HandoffSeconds is the fixed handoff overhead included in RemoteSeconds.
+	HandoffSeconds  float64
 	LocalSeconds    float64
 	StallSeconds    float64
 	TransferSeconds float64
@@ -163,13 +229,166 @@ func compatible(a, b Pod) bool {
 }
 
 // Decide chooses between prefilling uncached tokens on the decode pod and
-// prefilling them on the best prefill candidate followed by a KV transfer.
-//
-//	remote = U/R_P + Q_P + U*b/BW
-//	local  = U/R_D + Q_D
-//	stall  = N_D * U/R_D
-//	split when remote <= SLO and remote < (1 - margin) * (local + w * stall)
+// prefilling them on the best prefill candidate followed by a KV transfer,
+// using the configured strategy.
 func Decide(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
+	var d Decision
+	switch c.Strategy {
+	case StrategyModel:
+		d = decideModel(c, uncachedTokens, decode, prefill)
+	case StrategyGuardedStock:
+		d = decideGuardedStock(c, uncachedTokens, decode, prefill)
+	default:
+		d = decideAuto(c, uncachedTokens, decode, prefill)
+		d.Strategy = StrategyAuto
+		return d
+	}
+	d.Strategy = c.Strategy
+	return d
+}
+
+// decideAuto starts from the stock rule and overrules it only when the other path is
+// clearly cheaper:
+//
+//	keep = U/R_D + w * f * N_D * U/R_D
+//	move = U/R_P + Q_P + U*b/BW + H
+//	stock move -> keep when keep <= (1 - overrideMargin) * move
+//	stock keep -> move when move <= (1 - overrideMargin) * keep and move <= SLO
+func decideAuto(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
+	if uncachedTokens <= 0 {
+		return Decision{Reason: ReasonShortPrompt}
+	}
+	if decode.Disabled {
+		return Decision{Reason: ReasonDecodeDisabled}
+	}
+	if decode.KVUsage >= c.MaxDecodeKVUsage {
+		return Decision{Reason: ReasonDecodeKVFull}
+	}
+	first := ""
+	for _, p := range prefill {
+		if eligible(p, decode) {
+			first = p.Name
+			break
+		}
+	}
+	if first == "" {
+		return Decision{Reason: ReasonNoPrefillCandidate}
+	}
+	stockMove := uncachedTokens >= c.StockNonCachedTokens
+	d := Decision{Reason: ReasonStockKeep}
+	if stockMove {
+		d = Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
+	}
+	if !stockMove && uncachedTokens < c.MinUncachedTokens {
+		d.Reason = ReasonShortPrompt
+		return d
+	}
+	rateD, ok := c.rate(decode.Class)
+	if !ok {
+		return d
+	}
+	u := float64(uncachedTokens)
+	best, saw := bestRemote(c, u, decode, prefill)
+	if !saw {
+		return d
+	}
+	d.RemoteSeconds, d.TransferSeconds, d.HandoffSeconds = best.RemoteSeconds, best.TransferSeconds, best.HandoffSeconds
+	// The decode pod's waiting queue delays both paths alike: a remote-prefilled request still
+	// waits for a decode slot. It is left out so it cannot tip the comparison.
+	d.LocalSeconds = u / rateD
+	d.StallSeconds = c.StallFraction * float64(decode.Running) * u / rateD
+	keep := d.LocalSeconds + c.StallWeight*d.StallSeconds
+	move := d.RemoteSeconds
+	sure := 1 - c.OverrideMargin
+	if stockMove {
+		d.Prefill = best.Prefill
+		if keep <= sure*move {
+			d.Remote, d.Prefill, d.Reason = false, "", ReasonOverrideKeep
+		}
+		return d
+	}
+	if move <= sure*keep && (c.TTFTSLOMs <= 0 || move*1000 <= c.TTFTSLOMs) {
+		d.Remote, d.Prefill, d.Reason = true, best.Prefill, ReasonOverrideMove
+	}
+	return d
+}
+
+func eligible(p, decode Pod) bool {
+	return p.Name != decode.Name && !p.Disabled && compatible(p, decode)
+}
+
+// decideGuardedStock applies the stock threshold and vetoes splits that cannot help.
+func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
+	if uncachedTokens < c.StockNonCachedTokens || uncachedTokens <= 0 {
+		return Decision{Reason: ReasonStockKeep}
+	}
+	if decode.Disabled {
+		return Decision{Reason: ReasonDecodeDisabled}
+	}
+	if decode.KVUsage >= c.MaxDecodeKVUsage {
+		return Decision{Reason: ReasonDecodeKVFull}
+	}
+	first := ""
+	for _, p := range prefill {
+		if eligible(p, decode) {
+			first = p.Name
+			break
+		}
+	}
+	if first == "" {
+		return Decision{Reason: ReasonNoPrefillCandidate}
+	}
+	d := Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
+	rateD, ok := c.rate(decode.Class)
+	if !ok {
+		return d
+	}
+	u := float64(uncachedTokens)
+	best, saw := bestRemote(c, u, decode, prefill)
+	if !saw {
+		return d
+	}
+	d.Prefill = best.Prefill
+	d.RemoteSeconds, d.TransferSeconds, d.HandoffSeconds = best.RemoteSeconds, best.TransferSeconds, best.HandoffSeconds
+	d.LocalSeconds = u/rateD + c.queueSeconds(decode, rateD)
+	d.StallSeconds = c.StallFraction * float64(decode.Running) * u / rateD
+	if decode.Running <= c.IdleRunningRequests && decode.Waiting == 0 && d.RemoteSeconds >= d.LocalSeconds {
+		d.Remote = false
+		d.Reason = ReasonIdleVeto
+	}
+	return d
+}
+
+// bestRemote returns the fastest profiled prefill candidate's remote estimate.
+func bestRemote(c Config, u float64, decode Pod, prefill []Pod) (Decision, bool) {
+	handoff := c.HandoffOverheadMs / 1000
+	best := Decision{RemoteSeconds: math.Inf(1)}
+	saw := false
+	for _, p := range prefill {
+		if !eligible(p, decode) {
+			continue
+		}
+		rateP, ok := c.rate(p.Class)
+		if !ok {
+			continue
+		}
+		saw = true
+		transfer := u * float64(c.KVBytesPerToken) / c.bandwidthBytesPerSec(p.Class, decode.Class)
+		remote := u/rateP + c.queueSeconds(p, rateP) + transfer + handoff
+		if remote < best.RemoteSeconds {
+			best = Decision{Prefill: p.Name, RemoteSeconds: remote, TransferSeconds: transfer, HandoffSeconds: handoff}
+		}
+	}
+	return best, saw
+}
+
+// decideModel compares the estimates:
+//
+//	remote = U/R_P + Q_P + U*b/BW + H
+//	local  = U/R_D + Q_D
+//	stall  = f * N_D * U/R_D      (f = StallFraction, H = HandoffOverheadMs)
+//	split when remote <= SLO and remote < (1 - margin) * (local + w * stall)
+func decideModel(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
 	if uncachedTokens < c.MinUncachedTokens || uncachedTokens <= 0 {
 		return Decision{Reason: ReasonShortPrompt}
 	}
@@ -186,26 +405,9 @@ func Decide(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
 
 	u := float64(uncachedTokens)
 	local := u/rateD + c.queueSeconds(decode, rateD)
-	stall := float64(decode.Running) * u / rateD
+	stall := c.StallFraction * float64(decode.Running) * u / rateD
 
-	best := Decision{Reason: ReasonNoPrefillCandidate, RemoteSeconds: math.Inf(1)}
-	sawCandidate := false
-	for _, p := range prefill {
-		if p.Name == decode.Name || p.Disabled || !compatible(p, decode) {
-			continue
-		}
-		rateP, ok := c.rate(p.Class)
-		if !ok {
-			continue
-		}
-		sawCandidate = true
-		transfer := u * float64(c.KVBytesPerToken) / c.bandwidthBytesPerSec(p.Class, decode.Class)
-		remote := u/rateP + c.queueSeconds(p, rateP) + transfer
-		if remote < best.RemoteSeconds {
-			best = Decision{Prefill: p.Name, RemoteSeconds: remote, TransferSeconds: transfer}
-		}
-	}
-
+	best, sawCandidate := bestRemote(c, u, decode, prefill)
 	best.LocalSeconds = local
 	best.StallSeconds = stall
 	if !sawCandidate {

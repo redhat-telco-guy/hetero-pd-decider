@@ -1,5 +1,5 @@
 diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
-index 4a850a4..e612620 100644
+index 4a850a42..e6126207 100644
 --- a/cmd/epp/runner/runner.go
 +++ b/cmd/epp/runner/runner.go
 @@ -705,6 +705,7 @@ func (r *Runner) registerInTreePlugins() {
@@ -12,10 +12,10 @@ index 4a850a4..e612620 100644
  	fwkplugin.Register(queuedepth.QueueScorerType, fwkplugin.StabilityBeta, queuedepth.QueueScorerFactory)
 diff --git a/deploy/config/hetero-pd-epp-config.yaml b/deploy/config/hetero-pd-epp-config.yaml
 new file mode 100644
-index 0000000..ed8ba8f
+index 00000000..99076de0
 --- /dev/null
 +++ b/deploy/config/hetero-pd-epp-config.yaml
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +# Sample EPP configuration for P/D with prefill and decode pools of different
 +# accelerator classes. Pods carry llm-d.ai/role and llm-d.ai/accelerator-class.
 +# Profile throughputs are placeholders: measure them for your model and hardware.
@@ -45,7 +45,13 @@ index 0000000..ed8ba8f
 +    minUncachedTokens: 256
 +    bandwidthGbps: 25
 +    avgQueuedPromptTokens: 1024
++    handoffOverheadMs: 300         # measure: remote-path TTFT minus local TTFT, short prompts
++    stallFraction: 0.1             # chunked prefill: running streams lose ~10% of a local prefill
 +    fallbackNonCachedTokens: 1024
++    strategy: auto                 # auto | model | guarded-stock
++    overrideMargin: 0.25           # auto overrules stock only when the other path is 25% cheaper
++    stockNonCachedTokens: 1024
++    idleRunningRequests: 2
 +    profiles:
 +      nvidia-a30:
 +        prefillTokensPerSec: 5000
@@ -69,7 +75,7 @@ index 0000000..ed8ba8f
 +  - pluginRef: queue-scorer
 +    weight: 1
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
-index 1ced7fa..e1ceffa 100644
+index 1ced7fac..b4eed63e 100644
 --- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
 @@ -9,6 +9,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
@@ -80,7 +86,7 @@ index 1ced7fa..e1ceffa 100644
    - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
  
  ---
-@@ -168,6 +169,70 @@ None.
+@@ -168,6 +169,84 @@ None.
  
  ---
  
@@ -97,9 +103,17 @@ index 1ced7fa..e1ceffa 100644
 +- Remote: `U / R_P + Q_P + U * kvBytesPerToken / bandwidth`, using the best prefill-capable pod.
 +- Local: `U / R_D + Q_D`, plus a stall cost `N_D * U / R_D` weighted by `stallWeight`, where `N_D` is the number of requests running on the decode pod.
 +
-+R is the prefill throughput of the pod's accelerator class (from `profiles`), and Q is the waiting queue times `avgQueuedPromptTokens / R`. Remote prefill runs when its estimate is within `ttftSLOMs` and lower than `(1 - safetyMargin) * (local + stallWeight * stall)`.
++R is the prefill throughput of the pod's accelerator class (from `profiles`), and Q is the waiting queue times `avgQueuedPromptTokens / R`. The remote estimate also adds `handoffOverheadMs`, and stall is scaled by `stallFraction`. Remote prefill runs when its estimate is within `ttftSLOMs` and lower than `(1 - safetyMargin) * (local + stallWeight * stall)`.
 +
 +Requests stay local when U is below `minUncachedTokens`, when decode KV usage is at or above `maxDecodeKVUsage`, when no compatible prefill pod exists, or when a pod carries the disable label. When the decode pod's class has no profile, the decider applies `fallbackNonCachedTokens` as a plain threshold.
++
++`strategy` selects how the decision is made:
++
++- `auto` (default): start from the stock rule (split when U reaches `stockNonCachedTokens`) and overrule it, in either direction, only when the estimates show the other path is cheaper by at least `overrideMargin`; an overruling split must also meet `ttftSLOMs`. Keep cost is `U / R_D + stallWeight * stall` and move cost is the remote estimate. The decode pod's own waiting queue is left out of both, because a remotely prefilled request waits for the same decode slot. When the decode pod or every prefill candidate lacks a profile, the stock answer stands. Reasons are `stock-split`, `stock-keep`, `override-keep` and `override-move` plus the shared vetoes.
++- `model`: the estimate comparison above, for every request.
++- `guarded-stock`: the stock rule, with vetoes only: a split is cancelled when the decode pod has at most `idleRunningRequests` running streams, an empty queue and a remote estimate no faster than local (`idle-veto`). It never splits a request the stock rule would keep.
++
++Requests stay local under every strategy when decode KV usage is at or above `maxDecodeKVUsage`, when no compatible prefill pod exists, or when a pod carries the disable label.
 +
 +Every decision increments `llm_d_epp_hetero_pd_decision_total{plugin_name, reason, remote_prefill}`. Per-request estimates are logged at DEBUG verbosity.
 +
@@ -133,6 +147,12 @@ index 1ced7fa..e1ceffa 100644
 +| `bandwidthGbps` | `10` | KV transfer bandwidth between classes. |
 +| `sameClassBandwidthGbps` | `0` | Bandwidth between pods of the same class. Zero uses `bandwidthGbps`. |
 +| `avgQueuedPromptTokens` | `1024` | Prompt tokens assumed per waiting request. |
++| `handoffOverheadMs` | `0` | Fixed cost of the remote path beyond the KV transfer: the sidecar's prefill request and response and the decode pod fetching the KV. Measure it as remote-path TTFT minus local TTFT for short prompts. |
++| `stallFraction` | `1` | Share of a local prefill's time that running streams lose, in [0, 1]. 1 is a full freeze; with chunked prefill it is much lower. |
++| `strategy` | `auto` | `auto`, `model` or `guarded-stock`. |
++| `overrideMargin` | `0.25` | How much cheaper the other path must be before `auto` overrules the stock rule. |
++| `stockNonCachedTokens` | `1024` | Stock threshold that `auto` and `guarded-stock` start from. |
++| `idleRunningRequests` | `2` | Running streams at or below which `guarded-stock` treats the decode pod as idle. |
 +| `fallbackNonCachedTokens` | `1024` | Threshold used when the decode class has no profile. Zero keeps such requests local. |
 +| `prefixMatchInfoProducerName` | approximate producer | Prefix producer whose match info is read. |
 +
@@ -153,10 +173,10 @@ index 1ced7fa..e1ceffa 100644
  **Type:** `always-disagg-multimodal-decider`
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
 new file mode 100644
-index 0000000..000cc34
+index 00000000..68c56b95
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,430 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -194,6 +214,31 @@ index 0000000..000cc34
 +	ReasonNoPrefillCandidate = "no-prefill-candidate"
 +	ReasonSLOMiss            = "remote-misses-slo"
 +	ReasonMissingProfile     = "missing-profile"
++	// ReasonStockSplit and ReasonStockKeep are the stock threshold's own outcomes under
++	// the guarded-stock strategy; ReasonIdleVeto is the guard overruling a stock split.
++	ReasonStockSplit = "stock-split"
++	ReasonStockKeep  = "stock-keep"
++	ReasonIdleVeto   = "idle-veto"
++	// ReasonOverrideKeep and ReasonOverrideMove are the auto strategy overruling the
++	// stock rule because the other path is cheaper by at least OverrideMargin.
++	ReasonOverrideKeep = "override-keep"
++	ReasonOverrideMove = "override-move"
++)
++
++// Strategy values select how Decide reaches a decision.
++const (
++	// StrategyModel compares the remote and local estimates for every request.
++	StrategyModel = "model"
++	// StrategyGuardedStock applies the stock rule (split when the uncached tokens reach
++	// StockNonCachedTokens) and only overrules a split the estimates show cannot help:
++	// the decode pod is idle and local prefill is no slower, its KV cache is full, it is
++	// disabled, or no prefill pod can take the request. It never adds a split stock would not make.
++	StrategyGuardedStock = "guarded-stock"
++	// StrategyAuto (default) starts from the stock rule's answer and overrules it, in either
++	// direction, only when the estimates show the other path is cheaper by at least
++	// OverrideMargin and, for a move, meets the TTFT SLO. Without profiles for the decode
++	// pod and a prefill candidate, the stock answer stands.
++	StrategyAuto = "auto"
 +)
 +
 +// Profile is the measured prefill throughput of one accelerator class
@@ -224,6 +269,25 @@ index 0000000..000cc34
 +	SameClassBandwidthGbps float64 `json:"sameClassBandwidthGbps"`
 +	// AvgQueuedPromptTokens estimates the prefill work behind each waiting request.
 +	AvgQueuedPromptTokens int `json:"avgQueuedPromptTokens"`
++	// HandoffOverheadMs is the fixed cost of the remote path beyond the KV transfer itself:
++	// the decode sidecar's request to the prefill pod, its scheduling and response, and the
++	// decode pod fetching the KV. Lab measurements put it near 300 ms. Zero adds nothing.
++	HandoffOverheadMs float64 `json:"handoffOverheadMs"`
++	// StallFraction is the share of a local prefill's time that the decode pod's running
++	// streams actually lose, in [0, 1]. 1 models a full freeze. With chunked prefill the
++	// streams keep decoding between chunks and lose only a small part of it.
++	StallFraction float64 `json:"stallFraction"`
++	// Strategy is StrategyAuto (default; empty means auto), StrategyModel or StrategyGuardedStock.
++	Strategy string `json:"strategy"`
++	// StockNonCachedTokens is the stock threshold the guarded-stock strategy applies.
++	StockNonCachedTokens int `json:"stockNonCachedTokens"`
++	// IdleRunningRequests is the most running streams at which the guarded-stock strategy
++	// treats the decode pod as idle: with nothing to protect, a split that is not faster
++	// than local prefill is overruled.
++	IdleRunningRequests int `json:"idleRunningRequests"`
++	// OverrideMargin is how much cheaper, as a fraction in [0, 1), the other path must be
++	// before the auto strategy overrules the stock rule.
++	OverrideMargin float64 `json:"overrideMargin"`
 +	// Profiles maps accelerator class to its prefill throughput.
 +	Profiles map[string]Profile `json:"profiles"`
 +}
@@ -239,6 +303,12 @@ index 0000000..000cc34
 +		MinUncachedTokens:     256,
 +		BandwidthGbps:         10,
 +		AvgQueuedPromptTokens: 1024,
++		HandoffOverheadMs:     0,
++		StallFraction:         1,
++		Strategy:              StrategyAuto,
++		OverrideMargin:        0.25,
++		StockNonCachedTokens:  1024,
++		IdleRunningRequests:   2,
 +		Profiles:              map[string]Profile{},
 +	}
 +}
@@ -264,6 +334,18 @@ index 0000000..000cc34
 +		return errors.New("sameClassBandwidthGbps cannot be negative")
 +	case c.AvgQueuedPromptTokens < 0:
 +		return errors.New("avgQueuedPromptTokens cannot be negative")
++	case c.HandoffOverheadMs < 0:
++		return errors.New("handoffOverheadMs cannot be negative")
++	case c.StallFraction < 0 || c.StallFraction > 1:
++		return errors.New("stallFraction must be in [0, 1]")
++	case c.Strategy != "" && c.Strategy != StrategyModel && c.Strategy != StrategyGuardedStock && c.Strategy != StrategyAuto:
++		return fmt.Errorf("strategy must be %q, %q or %q", StrategyModel, StrategyGuardedStock, StrategyAuto)
++	case c.StockNonCachedTokens <= 0:
++		return errors.New("stockNonCachedTokens must be positive")
++	case c.IdleRunningRequests < 0:
++		return errors.New("idleRunningRequests cannot be negative")
++	case c.OverrideMargin < 0 || c.OverrideMargin >= 1:
++		return errors.New("overrideMargin must be in [0, 1)")
 +	}
 +	for class, p := range c.Profiles {
 +		if p.PrefillTokensPerSec <= 0 {
@@ -289,12 +371,16 @@ index 0000000..000cc34
 +// Decision is the outcome for one request. Seconds fields are zero when not estimated.
 +type Decision struct {
 +	Remote bool
++	// Strategy is the strategy that produced the decision.
++	Strategy string
 +	// Fallback is set when the inputs cannot be estimated; the caller applies its default rule.
 +	Fallback bool
 +	Reason   string
 +	// Prefill names the prefill pod the estimate used when Remote is set.
-+	Prefill         string
-+	RemoteSeconds   float64
++	Prefill       string
++	RemoteSeconds float64
++	// HandoffSeconds is the fixed handoff overhead included in RemoteSeconds.
++	HandoffSeconds  float64
 +	LocalSeconds    float64
 +	StallSeconds    float64
 +	TransferSeconds float64
@@ -322,13 +408,166 @@ index 0000000..000cc34
 +}
 +
 +// Decide chooses between prefilling uncached tokens on the decode pod and
-+// prefilling them on the best prefill candidate followed by a KV transfer.
-+//
-+//	remote = U/R_P + Q_P + U*b/BW
-+//	local  = U/R_D + Q_D
-+//	stall  = N_D * U/R_D
-+//	split when remote <= SLO and remote < (1 - margin) * (local + w * stall)
++// prefilling them on the best prefill candidate followed by a KV transfer,
++// using the configured strategy.
 +func Decide(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
++	var d Decision
++	switch c.Strategy {
++	case StrategyModel:
++		d = decideModel(c, uncachedTokens, decode, prefill)
++	case StrategyGuardedStock:
++		d = decideGuardedStock(c, uncachedTokens, decode, prefill)
++	default:
++		d = decideAuto(c, uncachedTokens, decode, prefill)
++		d.Strategy = StrategyAuto
++		return d
++	}
++	d.Strategy = c.Strategy
++	return d
++}
++
++// decideAuto starts from the stock rule and overrules it only when the other path is
++// clearly cheaper:
++//
++//	keep = U/R_D + w * f * N_D * U/R_D
++//	move = U/R_P + Q_P + U*b/BW + H
++//	stock move -> keep when keep <= (1 - overrideMargin) * move
++//	stock keep -> move when move <= (1 - overrideMargin) * keep and move <= SLO
++func decideAuto(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
++	if uncachedTokens <= 0 {
++		return Decision{Reason: ReasonShortPrompt}
++	}
++	if decode.Disabled {
++		return Decision{Reason: ReasonDecodeDisabled}
++	}
++	if decode.KVUsage >= c.MaxDecodeKVUsage {
++		return Decision{Reason: ReasonDecodeKVFull}
++	}
++	first := ""
++	for _, p := range prefill {
++		if eligible(p, decode) {
++			first = p.Name
++			break
++		}
++	}
++	if first == "" {
++		return Decision{Reason: ReasonNoPrefillCandidate}
++	}
++	stockMove := uncachedTokens >= c.StockNonCachedTokens
++	d := Decision{Reason: ReasonStockKeep}
++	if stockMove {
++		d = Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
++	}
++	if !stockMove && uncachedTokens < c.MinUncachedTokens {
++		d.Reason = ReasonShortPrompt
++		return d
++	}
++	rateD, ok := c.rate(decode.Class)
++	if !ok {
++		return d
++	}
++	u := float64(uncachedTokens)
++	best, saw := bestRemote(c, u, decode, prefill)
++	if !saw {
++		return d
++	}
++	d.RemoteSeconds, d.TransferSeconds, d.HandoffSeconds = best.RemoteSeconds, best.TransferSeconds, best.HandoffSeconds
++	// The decode pod's waiting queue delays both paths alike: a remote-prefilled request still
++	// waits for a decode slot. It is left out so it cannot tip the comparison.
++	d.LocalSeconds = u / rateD
++	d.StallSeconds = c.StallFraction * float64(decode.Running) * u / rateD
++	keep := d.LocalSeconds + c.StallWeight*d.StallSeconds
++	move := d.RemoteSeconds
++	sure := 1 - c.OverrideMargin
++	if stockMove {
++		d.Prefill = best.Prefill
++		if keep <= sure*move {
++			d.Remote, d.Prefill, d.Reason = false, "", ReasonOverrideKeep
++		}
++		return d
++	}
++	if move <= sure*keep && (c.TTFTSLOMs <= 0 || move*1000 <= c.TTFTSLOMs) {
++		d.Remote, d.Prefill, d.Reason = true, best.Prefill, ReasonOverrideMove
++	}
++	return d
++}
++
++func eligible(p, decode Pod) bool {
++	return p.Name != decode.Name && !p.Disabled && compatible(p, decode)
++}
++
++// decideGuardedStock applies the stock threshold and vetoes splits that cannot help.
++func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
++	if uncachedTokens < c.StockNonCachedTokens || uncachedTokens <= 0 {
++		return Decision{Reason: ReasonStockKeep}
++	}
++	if decode.Disabled {
++		return Decision{Reason: ReasonDecodeDisabled}
++	}
++	if decode.KVUsage >= c.MaxDecodeKVUsage {
++		return Decision{Reason: ReasonDecodeKVFull}
++	}
++	first := ""
++	for _, p := range prefill {
++		if eligible(p, decode) {
++			first = p.Name
++			break
++		}
++	}
++	if first == "" {
++		return Decision{Reason: ReasonNoPrefillCandidate}
++	}
++	d := Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
++	rateD, ok := c.rate(decode.Class)
++	if !ok {
++		return d
++	}
++	u := float64(uncachedTokens)
++	best, saw := bestRemote(c, u, decode, prefill)
++	if !saw {
++		return d
++	}
++	d.Prefill = best.Prefill
++	d.RemoteSeconds, d.TransferSeconds, d.HandoffSeconds = best.RemoteSeconds, best.TransferSeconds, best.HandoffSeconds
++	d.LocalSeconds = u/rateD + c.queueSeconds(decode, rateD)
++	d.StallSeconds = c.StallFraction * float64(decode.Running) * u / rateD
++	if decode.Running <= c.IdleRunningRequests && decode.Waiting == 0 && d.RemoteSeconds >= d.LocalSeconds {
++		d.Remote = false
++		d.Reason = ReasonIdleVeto
++	}
++	return d
++}
++
++// bestRemote returns the fastest profiled prefill candidate's remote estimate.
++func bestRemote(c Config, u float64, decode Pod, prefill []Pod) (Decision, bool) {
++	handoff := c.HandoffOverheadMs / 1000
++	best := Decision{RemoteSeconds: math.Inf(1)}
++	saw := false
++	for _, p := range prefill {
++		if !eligible(p, decode) {
++			continue
++		}
++		rateP, ok := c.rate(p.Class)
++		if !ok {
++			continue
++		}
++		saw = true
++		transfer := u * float64(c.KVBytesPerToken) / c.bandwidthBytesPerSec(p.Class, decode.Class)
++		remote := u/rateP + c.queueSeconds(p, rateP) + transfer + handoff
++		if remote < best.RemoteSeconds {
++			best = Decision{Prefill: p.Name, RemoteSeconds: remote, TransferSeconds: transfer, HandoffSeconds: handoff}
++		}
++	}
++	return best, saw
++}
++
++// decideModel compares the estimates:
++//
++//	remote = U/R_P + Q_P + U*b/BW + H
++//	local  = U/R_D + Q_D
++//	stall  = f * N_D * U/R_D      (f = StallFraction, H = HandoffOverheadMs)
++//	split when remote <= SLO and remote < (1 - margin) * (local + w * stall)
++func decideModel(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
 +	if uncachedTokens < c.MinUncachedTokens || uncachedTokens <= 0 {
 +		return Decision{Reason: ReasonShortPrompt}
 +	}
@@ -345,26 +584,9 @@ index 0000000..000cc34
 +
 +	u := float64(uncachedTokens)
 +	local := u/rateD + c.queueSeconds(decode, rateD)
-+	stall := float64(decode.Running) * u / rateD
++	stall := c.StallFraction * float64(decode.Running) * u / rateD
 +
-+	best := Decision{Reason: ReasonNoPrefillCandidate, RemoteSeconds: math.Inf(1)}
-+	sawCandidate := false
-+	for _, p := range prefill {
-+		if p.Name == decode.Name || p.Disabled || !compatible(p, decode) {
-+			continue
-+		}
-+		rateP, ok := c.rate(p.Class)
-+		if !ok {
-+			continue
-+		}
-+		sawCandidate = true
-+		transfer := u * float64(c.KVBytesPerToken) / c.bandwidthBytesPerSec(p.Class, decode.Class)
-+		remote := u/rateP + c.queueSeconds(p, rateP) + transfer
-+		if remote < best.RemoteSeconds {
-+			best = Decision{Prefill: p.Name, RemoteSeconds: remote, TransferSeconds: transfer}
-+		}
-+	}
-+
++	best, sawCandidate := bestRemote(c, u, decode, prefill)
 +	best.LocalSeconds = local
 +	best.StallSeconds = stall
 +	if !sawCandidate {
@@ -387,10 +609,10 @@ index 0000000..000cc34
 +}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
 new file mode 100644
-index 0000000..2a83a11
+index 00000000..ee7e08aa
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,456 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -424,6 +646,7 @@ index 0000000..2a83a11
 +// 25 GbE with Llama-3.1-8B. Throughputs are placeholders, not measurements.
 +func labConfig() Config {
 +	c := DefaultConfig()
++	c.Strategy = StrategyModel
 +	c.TTFTSLOMs = 1000
 +	c.BandwidthGbps = 25
 +	c.Profiles = map[string]Profile{
@@ -587,7 +810,15 @@ index 0000000..2a83a11
 +		func(c *Config) { c.BandwidthGbps = 0 },
 +		func(c *Config) { c.SameClassBandwidthGbps = -1 },
 +		func(c *Config) { c.AvgQueuedPromptTokens = -1 },
++		func(c *Config) { c.HandoffOverheadMs = -1 },
++		func(c *Config) { c.StallFraction = -0.1 },
++		func(c *Config) { c.StallFraction = 1.1 },
 +		func(c *Config) { c.Profiles["bad"] = Profile{} },
++		func(c *Config) { c.Strategy = "stock" },
++		func(c *Config) { c.StockNonCachedTokens = 0 },
++		func(c *Config) { c.IdleRunningRequests = -1 },
++		func(c *Config) { c.OverrideMargin = 1 },
++		func(c *Config) { c.OverrideMargin = -0.1 },
 +	}
 +	for i, mutate := range bad {
 +		c := labConfig()
@@ -604,12 +835,246 @@ index 0000000..2a83a11
 +		t.Fatalf("%s = %v, want %v", name, got, want)
 +	}
 +}
++
++// sameClassLab mirrors the A30-to-A30 lab: both pods are the same class and speed.
++func sameClassLab() (Config, Pod, Pod) {
++	c := labConfig()
++	c.Profiles[classA30] = Profile{PrefillTokensPerSec: 5000}
++	decode := Pod{Name: "a30-decode", Class: classA30, Running: 32}
++	prefill := Pod{Name: "a30-prefill", Class: classA30}
++	return c, decode, prefill
++}
++
++func TestDecideDefaultsKeepPreviousBehaviour(t *testing.T) {
++	c := DefaultConfig()
++	if c.HandoffOverheadMs != 0 || c.StallFraction != 1 {
++		t.Fatalf("defaults changed: handoff %v, stallFraction %v", c.HandoffOverheadMs, c.StallFraction)
++	}
++}
++
++func TestDecideHandoffOverhead(t *testing.T) {
++	c, decode, prefill := sameClassLab()
++	c.StallFraction = 0.1
++	// A 300-token chat message on a busy pod moves when the handoff is free...
++	if d := Decide(c, 300, decode, []Pod{prefill}); !d.Remote {
++		t.Fatalf("without overhead: want remote, got %+v", d)
++	}
++	// ...and stays local once the measured 300 ms handoff cost is counted.
++	c.HandoffOverheadMs = 300
++	d := Decide(c, 300, decode, []Pod{prefill})
++	if d.Remote || d.Reason != ReasonLocalBetter {
++		t.Fatalf("with 300 ms overhead: want local-better, got %+v", d)
++	}
++	assertNear(t, "HandoffSeconds", d.HandoffSeconds, 0.3)
++	assertNear(t, "RemoteSeconds", d.RemoteSeconds, 300.0/5000+d.TransferSeconds+0.3)
++}
++
++func TestDecideStallFraction(t *testing.T) {
++	c, decode, prefill := sameClassLab()
++	c.HandoffOverheadMs = 50
++	full := Decide(c, 300, decode, []Pod{prefill})
++	c.StallFraction = 0.1
++	chunked := Decide(c, 300, decode, []Pod{prefill})
++	assertNear(t, "stall scales with fraction", chunked.StallSeconds, 0.1*full.StallSeconds)
++	if !full.Remote || chunked.Remote {
++		t.Fatalf("want remote with full-freeze stall and local with chunked stall; got %v and %v", full.Remote, chunked.Remote)
++	}
++}
++
++func TestDecideCalibratedLabScenarios(t *testing.T) {
++	// The A30-to-A30 suite with calibrated settings: chat and documents stay local on
++	// identical cards, because moving costs a handoff and saves little.
++	c, decode, prefill := sameClassLab()
++	c.HandoffOverheadMs = 300
++	c.StallFraction = 0.1
++	for _, tc := range []struct {
++		name    string
++		tokens  int
++		running int
++	}{{"busy chat", 300, 32}, {"busy medium document", 755, 32}, {"busy long document", 2126, 32}, {"idle long document", 2126, 0}, {"light chat", 300, 8}} {
++		decode.Running = tc.running
++		if d := Decide(c, tc.tokens, decode, []Pod{prefill}); d.Remote {
++			t.Errorf("%s: want local, got %+v", tc.name, d)
++		}
++	}
++	// A slower prefill card feeding a much faster decode card under heavy load still offloads
++	// a long prompt when the stall is large enough to pay for the handoff.
++	g := labConfig()
++	g.HandoffOverheadMs = 300
++	g.StallFraction = 0.5
++	if d := Decide(g, promptLong, gaudi(64), []Pod{a30(0)}); !d.Remote {
++		t.Errorf("busy Gaudi, long prompt: want remote, got %+v", d)
++	}
++}
++
++// calibratedA30Pair is the A30-to-A30 lab after calibration.
++func calibratedA30Pair(strategy string) (Config, Pod, Pod) {
++	c := DefaultConfig()
++	c.Strategy = strategy
++	c.KVBytesPerToken = 57344
++	c.TTFTSLOMs = 1000
++	c.BandwidthGbps = 10
++	c.HandoffOverheadMs = 82
++	c.StallFraction = 0.1
++	c.Profiles = map[string]Profile{classA30: {PrefillTokensPerSec: 7035}, classGaudi3: {PrefillTokensPerSec: 20000}}
++	return c, Pod{Name: "a30-decode", Class: classA30}, Pod{Name: "a30-prefill", Class: classA30}
++}
++
++func TestDecideDefaultStrategyIsAuto(t *testing.T) {
++	if DefaultConfig().Strategy != StrategyAuto {
++		t.Fatal("default strategy should be auto")
++	}
++	c, decode, prefill := calibratedA30Pair("")
++	if err := c.Validate(); err != nil {
++		t.Fatal(err)
++	}
++	if d := Decide(c, promptLong, decode, []Pod{prefill}); d.Strategy != StrategyAuto {
++		t.Fatalf("empty strategy: got %+v, want auto", d)
++	}
++}
++
++func TestDecideGuardedStock(t *testing.T) {
++	c, idle, prefill := calibratedA30Pair(StrategyGuardedStock)
++	busy := idle
++	busy.Running = 32
++	queued := idle
++	queued.Waiting = 3
++	full := busy
++	full.KVUsage = 0.95
++	off := busy
++	off.Disabled = true
++	cases := []struct {
++		name     string
++		tokens   int
++		decode   Pod
++		prefill  []Pod
++		remote   bool
++		reason   string
++		estimate bool
++	}{
++		{"chat below stock threshold", 250, busy, []Pod{prefill}, false, ReasonStockKeep, false},
++		{"medium doc below threshold", 700, busy, []Pod{prefill}, false, ReasonStockKeep, false},
++		{"busy long doc follows stock", 2000, busy, []Pod{prefill}, true, ReasonStockSplit, true},
++		{"busy huge doc follows stock past the SLO", 6000, busy, []Pod{prefill}, true, ReasonStockSplit, true},
++		{"idle long doc is vetoed", 2000, idle, []Pod{prefill}, false, ReasonIdleVeto, true},
++		{"queued decode pod is not idle", 2000, queued, []Pod{prefill}, true, ReasonStockSplit, true},
++		{"kv full", 2000, full, []Pod{prefill}, false, ReasonDecodeKVFull, false},
++		{"decode disabled", 2000, off, []Pod{prefill}, false, ReasonDecodeDisabled, false},
++		{"no prefill pod", 2000, busy, nil, false, ReasonNoPrefillCandidate, false},
++		{"only itself", 2000, busy, []Pod{busy}, false, ReasonNoPrefillCandidate, false},
++	}
++	for _, tc := range cases {
++		d := Decide(c, tc.tokens, tc.decode, tc.prefill)
++		if d.Remote != tc.remote || d.Reason != tc.reason || d.Strategy != StrategyGuardedStock {
++			t.Errorf("%s: got remote=%v reason=%s strategy=%s, want %v %s", tc.name, d.Remote, d.Reason, d.Strategy, tc.remote, tc.reason)
++		}
++		if tc.estimate && (d.RemoteSeconds <= 0 || d.LocalSeconds <= 0) {
++			t.Errorf("%s: estimates missing: %+v", tc.name, d)
++		}
++		if d.Remote && d.Prefill != prefill.Name {
++			t.Errorf("%s: prefill %q", tc.name, d.Prefill)
++		}
++	}
++}
++
++func TestDecideGuardedStockIdleButFasterRemoteSplits(t *testing.T) {
++	// Idle A30 decode, Gaudi 3 prefill: remote is faster, so the guard lets the split through.
++	c, idle, _ := calibratedA30Pair(StrategyGuardedStock)
++	c.BandwidthGbps = 100
++	d := Decide(c, 6000, idle, []Pod{{Name: "gaudi-prefill", Class: classGaudi3}})
++	if !d.Remote || d.Reason != ReasonStockSplit || d.Prefill != "gaudi-prefill" {
++		t.Fatalf("got %+v", d)
++	}
++}
++
++func TestDecideGuardedStockWithoutProfilesIsStock(t *testing.T) {
++	c, idle, prefill := calibratedA30Pair(StrategyGuardedStock)
++	c.Profiles = map[string]Profile{}
++	d := Decide(c, 2000, idle, []Pod{prefill})
++	if !d.Remote || d.Reason != ReasonStockSplit || d.RemoteSeconds != 0 {
++		t.Fatalf("got %+v, want a plain stock split", d)
++	}
++}
++
++func TestDecideAuto(t *testing.T) {
++	c, idle, a30Prefill := calibratedA30Pair(StrategyAuto)
++	busy := idle
++	busy.Running = 32
++	gaudiPrefill := Pod{Name: "gaudi-prefill", Class: classGaudi3}
++	gaudiDecode := Pod{Name: "gaudi-decode", Class: classGaudi3, Running: 32}
++	full := busy
++	full.KVUsage = 0.95
++	queuedBusy := busy
++	queuedBusy.Waiting = 10
++	cases := []struct {
++		name    string
++		tokens  int
++		decode  Pod
++		prefill []Pod
++		remote  bool
++		reason  string
++	}{
++		{"A30 pair busy chat: agrees with stock keep", 300, busy, []Pod{a30Prefill}, false, ReasonStockKeep},
++		{"A30 pair busy medium doc: agrees with stock keep", 700, busy, []Pod{a30Prefill}, false, ReasonStockKeep},
++		{"A30 pair busy long doc: keep not clearly cheaper, stock move stands", 2000, busy, []Pod{a30Prefill}, true, ReasonStockSplit},
++		{"A30 pair busy huge report: stock move stands", 6000, busy, []Pod{a30Prefill}, true, ReasonStockSplit},
++		{"A30 pair idle long doc: overrules to keep", 2000, idle, []Pod{a30Prefill}, false, ReasonOverrideKeep},
++		{"A30 decode, Gaudi prefill, long doc: stock move stands", 2000, busy, []Pod{gaudiPrefill}, true, ReasonStockSplit},
++		{"Gaudi decode, A30 prefill, long doc: overrules to keep", 2000, gaudiDecode, []Pod{a30Prefill}, false, ReasonOverrideKeep},
++		{"A30 decode, Gaudi prefill, medium doc: 17% is not sure enough", 700, busy, []Pod{gaudiPrefill}, false, ReasonStockKeep},
++		{"short prompt never moves", 100, busy, []Pod{gaudiPrefill}, false, ReasonShortPrompt},
++		{"kv full", 2000, full, []Pod{a30Prefill}, false, ReasonDecodeKVFull},
++		{"no reader", 2000, busy, nil, false, ReasonNoPrefillCandidate},
++		{"unprofiled decode: stock answer stands", 2000, Pod{Name: "h100", Class: "nvidia-h100", Running: 32}, []Pod{a30Prefill}, true, ReasonStockSplit},
++		{"unprofiled reader: stock answer stands", 700, busy, []Pod{{Name: "mi300", Class: "amd-mi300x"}}, false, ReasonStockKeep},
++		{"unprofiled reader, long doc: stock move stands", 2000, busy, []Pod{{Name: "mi300", Class: "amd-mi300x"}}, true, ReasonStockSplit},
++		{"nothing uncached", 0, busy, []Pod{a30Prefill}, false, ReasonShortPrompt},
++		{"decode disabled", 2000, Pod{Name: "off", Class: classA30, Disabled: true}, []Pod{a30Prefill}, false, ReasonDecodeDisabled}, {"queued decode pod: queue counts for both paths, chat stays", 300, queuedBusy, []Pod{a30Prefill}, false, ReasonStockKeep},
++		{"queued decode pod: medium doc stays", 700, queuedBusy, []Pod{a30Prefill}, false, ReasonStockKeep},
++		{"queued decode pod, idle Gaudi: 900 tokens still moves on speed", 900, queuedBusy, []Pod{gaudiPrefill}, true, ReasonOverrideMove},
++	}
++	for _, tc := range cases {
++		d := Decide(c, tc.tokens, tc.decode, tc.prefill)
++		if d.Remote != tc.remote || d.Reason != tc.reason || d.Strategy != StrategyAuto {
++			t.Errorf("%s: got remote=%v reason=%s (keep %.3f+stall %.3f, move %.3f), want %v %s",
++				tc.name, d.Remote, d.Reason, d.LocalSeconds, d.StallSeconds, d.RemoteSeconds, tc.remote, tc.reason)
++		}
++	}
++	// A clearly cheaper move overrules a stock keep: busy A30 decode, idle Gaudi reader, 900 tokens, fast link.
++	c.BandwidthGbps = 100
++	c.HandoffOverheadMs = 20
++	c.StallFraction = 0.3
++	d := Decide(c, 900, busy, []Pod{gaudiPrefill})
++	if !d.Remote || d.Reason != ReasonOverrideMove || d.Prefill != "gaudi-prefill" {
++		t.Errorf("override move: got %+v", d)
++	}
++	// ...but not when the move would miss the SLO.
++	c.TTFTSLOMs = 50
++	if d := Decide(c, 900, busy, []Pod{gaudiPrefill}); d.Remote || d.Reason != ReasonStockKeep {
++		t.Errorf("override move past SLO: got %+v", d)
++	}
++	// Margin 0 overrules on any saving.
++	c.TTFTSLOMs = 0
++	c.OverrideMargin = 0
++	c.BandwidthGbps, c.HandoffOverheadMs, c.StallFraction = 10, 82, 0.1
++	if d := Decide(c, 700, busy, []Pod{gaudiPrefill}); !d.Remote || d.Reason != ReasonOverrideMove {
++		t.Errorf("margin 0: got %+v", d)
++	}
++}
++
++func TestDecideGuardedStockUnprofiledReaderIsStock(t *testing.T) {
++	c, idle, _ := calibratedA30Pair(StrategyGuardedStock)
++	d := Decide(c, 2000, idle, []Pod{{Name: "mi300", Class: "amd-mi300x"}})
++	if !d.Remote || d.Reason != ReasonStockSplit || d.Prefill != "mi300" {
++		t.Fatalf("got %+v", d)
++	}
++}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
 new file mode 100644
-index 0000000..1253c5b
+index 00000000..15047ae1
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,281 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -882,19 +1347,21 @@ index 0000000..1253c5b
 +
 +	if v := logger.V(logging.DEBUG); v.Enabled() {
 +		v.Info("hetero-pd-decider decision",
-+			"remote", decision.Remote, "reason", decision.Reason, "fallback", decision.Fallback,
++			"remote", decision.Remote, "reason", decision.Reason, "strategy", decision.Strategy,
++			"fallback", decision.Fallback,
 +			"uncachedTokens", uncached, "prefillPod", decision.Prefill,
 +			"remoteSeconds", decision.RemoteSeconds, "localSeconds", decision.LocalSeconds,
-+			"stallSeconds", decision.StallSeconds, "transferSeconds", decision.TransferSeconds)
++			"stallSeconds", decision.StallSeconds, "transferSeconds", decision.TransferSeconds,
++			"handoffSeconds", decision.HandoffSeconds)
 +	}
 +	return decision.Remote
 +}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
 new file mode 100644
-index 0000000..dd553a4
+index 00000000..ff5f5bbb
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,279 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -941,6 +1408,7 @@ index 0000000..dd553a4
 +// Throughputs are placeholders, not measurements.
 +func heteroLabConfig() HeteroPDDeciderConfig {
 +	c := defaultHeteroPDDeciderConfig()
++	c.Strategy = hetero.StrategyModel // these tests exercise the cost model directly
 +	c.TTFTSLOMs = 1000
 +	c.BandwidthGbps = 25
 +	c.Profiles = map[string]hetero.Profile{
@@ -1169,8 +1637,12 @@ index 0000000..dd553a4
 +	assert.Len(t, required, 5)
 +	assert.Empty(t, d.Produces())
 +}
++
++func TestHeteroPDDeciderDefaultsToAuto(t *testing.T) {
++	assert.Equal(t, hetero.StrategyAuto, defaultHeteroPDDeciderConfig().Strategy)
++}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
-index 9e3656b..382e02c 100644
+index 9e3656bc..382e02c0 100644
 --- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
 @@ -19,6 +19,7 @@ package disagg

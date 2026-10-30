@@ -31,6 +31,7 @@ const (
 // 25 GbE with Llama-3.1-8B. Throughputs are placeholders, not measurements.
 func labConfig() Config {
 	c := DefaultConfig()
+	c.Strategy = StrategyModel
 	c.TTFTSLOMs = 1000
 	c.BandwidthGbps = 25
 	c.Profiles = map[string]Profile{
@@ -194,7 +195,15 @@ func TestConfigValidate(t *testing.T) {
 		func(c *Config) { c.BandwidthGbps = 0 },
 		func(c *Config) { c.SameClassBandwidthGbps = -1 },
 		func(c *Config) { c.AvgQueuedPromptTokens = -1 },
+		func(c *Config) { c.HandoffOverheadMs = -1 },
+		func(c *Config) { c.StallFraction = -0.1 },
+		func(c *Config) { c.StallFraction = 1.1 },
 		func(c *Config) { c.Profiles["bad"] = Profile{} },
+		func(c *Config) { c.Strategy = "stock" },
+		func(c *Config) { c.StockNonCachedTokens = 0 },
+		func(c *Config) { c.IdleRunningRequests = -1 },
+		func(c *Config) { c.OverrideMargin = 1 },
+		func(c *Config) { c.OverrideMargin = -0.1 },
 	}
 	for i, mutate := range bad {
 		c := labConfig()
@@ -209,5 +218,239 @@ func assertNear(t *testing.T, name string, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-9 {
 		t.Fatalf("%s = %v, want %v", name, got, want)
+	}
+}
+
+// sameClassLab mirrors the A30-to-A30 lab: both pods are the same class and speed.
+func sameClassLab() (Config, Pod, Pod) {
+	c := labConfig()
+	c.Profiles[classA30] = Profile{PrefillTokensPerSec: 5000}
+	decode := Pod{Name: "a30-decode", Class: classA30, Running: 32}
+	prefill := Pod{Name: "a30-prefill", Class: classA30}
+	return c, decode, prefill
+}
+
+func TestDecideDefaultsKeepPreviousBehaviour(t *testing.T) {
+	c := DefaultConfig()
+	if c.HandoffOverheadMs != 0 || c.StallFraction != 1 {
+		t.Fatalf("defaults changed: handoff %v, stallFraction %v", c.HandoffOverheadMs, c.StallFraction)
+	}
+}
+
+func TestDecideHandoffOverhead(t *testing.T) {
+	c, decode, prefill := sameClassLab()
+	c.StallFraction = 0.1
+	// A 300-token chat message on a busy pod moves when the handoff is free...
+	if d := Decide(c, 300, decode, []Pod{prefill}); !d.Remote {
+		t.Fatalf("without overhead: want remote, got %+v", d)
+	}
+	// ...and stays local once the measured 300 ms handoff cost is counted.
+	c.HandoffOverheadMs = 300
+	d := Decide(c, 300, decode, []Pod{prefill})
+	if d.Remote || d.Reason != ReasonLocalBetter {
+		t.Fatalf("with 300 ms overhead: want local-better, got %+v", d)
+	}
+	assertNear(t, "HandoffSeconds", d.HandoffSeconds, 0.3)
+	assertNear(t, "RemoteSeconds", d.RemoteSeconds, 300.0/5000+d.TransferSeconds+0.3)
+}
+
+func TestDecideStallFraction(t *testing.T) {
+	c, decode, prefill := sameClassLab()
+	c.HandoffOverheadMs = 50
+	full := Decide(c, 300, decode, []Pod{prefill})
+	c.StallFraction = 0.1
+	chunked := Decide(c, 300, decode, []Pod{prefill})
+	assertNear(t, "stall scales with fraction", chunked.StallSeconds, 0.1*full.StallSeconds)
+	if !full.Remote || chunked.Remote {
+		t.Fatalf("want remote with full-freeze stall and local with chunked stall; got %v and %v", full.Remote, chunked.Remote)
+	}
+}
+
+func TestDecideCalibratedLabScenarios(t *testing.T) {
+	// The A30-to-A30 suite with calibrated settings: chat and documents stay local on
+	// identical cards, because moving costs a handoff and saves little.
+	c, decode, prefill := sameClassLab()
+	c.HandoffOverheadMs = 300
+	c.StallFraction = 0.1
+	for _, tc := range []struct {
+		name    string
+		tokens  int
+		running int
+	}{{"busy chat", 300, 32}, {"busy medium document", 755, 32}, {"busy long document", 2126, 32}, {"idle long document", 2126, 0}, {"light chat", 300, 8}} {
+		decode.Running = tc.running
+		if d := Decide(c, tc.tokens, decode, []Pod{prefill}); d.Remote {
+			t.Errorf("%s: want local, got %+v", tc.name, d)
+		}
+	}
+	// A slower prefill card feeding a much faster decode card under heavy load still offloads
+	// a long prompt when the stall is large enough to pay for the handoff.
+	g := labConfig()
+	g.HandoffOverheadMs = 300
+	g.StallFraction = 0.5
+	if d := Decide(g, promptLong, gaudi(64), []Pod{a30(0)}); !d.Remote {
+		t.Errorf("busy Gaudi, long prompt: want remote, got %+v", d)
+	}
+}
+
+// calibratedA30Pair is the A30-to-A30 lab after calibration.
+func calibratedA30Pair(strategy string) (Config, Pod, Pod) {
+	c := DefaultConfig()
+	c.Strategy = strategy
+	c.KVBytesPerToken = 57344
+	c.TTFTSLOMs = 1000
+	c.BandwidthGbps = 10
+	c.HandoffOverheadMs = 82
+	c.StallFraction = 0.1
+	c.Profiles = map[string]Profile{classA30: {PrefillTokensPerSec: 7035}, classGaudi3: {PrefillTokensPerSec: 20000}}
+	return c, Pod{Name: "a30-decode", Class: classA30}, Pod{Name: "a30-prefill", Class: classA30}
+}
+
+func TestDecideDefaultStrategyIsAuto(t *testing.T) {
+	if DefaultConfig().Strategy != StrategyAuto {
+		t.Fatal("default strategy should be auto")
+	}
+	c, decode, prefill := calibratedA30Pair("")
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if d := Decide(c, promptLong, decode, []Pod{prefill}); d.Strategy != StrategyAuto {
+		t.Fatalf("empty strategy: got %+v, want auto", d)
+	}
+}
+
+func TestDecideGuardedStock(t *testing.T) {
+	c, idle, prefill := calibratedA30Pair(StrategyGuardedStock)
+	busy := idle
+	busy.Running = 32
+	queued := idle
+	queued.Waiting = 3
+	full := busy
+	full.KVUsage = 0.95
+	off := busy
+	off.Disabled = true
+	cases := []struct {
+		name     string
+		tokens   int
+		decode   Pod
+		prefill  []Pod
+		remote   bool
+		reason   string
+		estimate bool
+	}{
+		{"chat below stock threshold", 250, busy, []Pod{prefill}, false, ReasonStockKeep, false},
+		{"medium doc below threshold", 700, busy, []Pod{prefill}, false, ReasonStockKeep, false},
+		{"busy long doc follows stock", 2000, busy, []Pod{prefill}, true, ReasonStockSplit, true},
+		{"busy huge doc follows stock past the SLO", 6000, busy, []Pod{prefill}, true, ReasonStockSplit, true},
+		{"idle long doc is vetoed", 2000, idle, []Pod{prefill}, false, ReasonIdleVeto, true},
+		{"queued decode pod is not idle", 2000, queued, []Pod{prefill}, true, ReasonStockSplit, true},
+		{"kv full", 2000, full, []Pod{prefill}, false, ReasonDecodeKVFull, false},
+		{"decode disabled", 2000, off, []Pod{prefill}, false, ReasonDecodeDisabled, false},
+		{"no prefill pod", 2000, busy, nil, false, ReasonNoPrefillCandidate, false},
+		{"only itself", 2000, busy, []Pod{busy}, false, ReasonNoPrefillCandidate, false},
+	}
+	for _, tc := range cases {
+		d := Decide(c, tc.tokens, tc.decode, tc.prefill)
+		if d.Remote != tc.remote || d.Reason != tc.reason || d.Strategy != StrategyGuardedStock {
+			t.Errorf("%s: got remote=%v reason=%s strategy=%s, want %v %s", tc.name, d.Remote, d.Reason, d.Strategy, tc.remote, tc.reason)
+		}
+		if tc.estimate && (d.RemoteSeconds <= 0 || d.LocalSeconds <= 0) {
+			t.Errorf("%s: estimates missing: %+v", tc.name, d)
+		}
+		if d.Remote && d.Prefill != prefill.Name {
+			t.Errorf("%s: prefill %q", tc.name, d.Prefill)
+		}
+	}
+}
+
+func TestDecideGuardedStockIdleButFasterRemoteSplits(t *testing.T) {
+	// Idle A30 decode, Gaudi 3 prefill: remote is faster, so the guard lets the split through.
+	c, idle, _ := calibratedA30Pair(StrategyGuardedStock)
+	c.BandwidthGbps = 100
+	d := Decide(c, 6000, idle, []Pod{{Name: "gaudi-prefill", Class: classGaudi3}})
+	if !d.Remote || d.Reason != ReasonStockSplit || d.Prefill != "gaudi-prefill" {
+		t.Fatalf("got %+v", d)
+	}
+}
+
+func TestDecideGuardedStockWithoutProfilesIsStock(t *testing.T) {
+	c, idle, prefill := calibratedA30Pair(StrategyGuardedStock)
+	c.Profiles = map[string]Profile{}
+	d := Decide(c, 2000, idle, []Pod{prefill})
+	if !d.Remote || d.Reason != ReasonStockSplit || d.RemoteSeconds != 0 {
+		t.Fatalf("got %+v, want a plain stock split", d)
+	}
+}
+
+func TestDecideAuto(t *testing.T) {
+	c, idle, a30Prefill := calibratedA30Pair(StrategyAuto)
+	busy := idle
+	busy.Running = 32
+	gaudiPrefill := Pod{Name: "gaudi-prefill", Class: classGaudi3}
+	gaudiDecode := Pod{Name: "gaudi-decode", Class: classGaudi3, Running: 32}
+	full := busy
+	full.KVUsage = 0.95
+	queuedBusy := busy
+	queuedBusy.Waiting = 10
+	cases := []struct {
+		name    string
+		tokens  int
+		decode  Pod
+		prefill []Pod
+		remote  bool
+		reason  string
+	}{
+		{"A30 pair busy chat: agrees with stock keep", 300, busy, []Pod{a30Prefill}, false, ReasonStockKeep},
+		{"A30 pair busy medium doc: agrees with stock keep", 700, busy, []Pod{a30Prefill}, false, ReasonStockKeep},
+		{"A30 pair busy long doc: keep not clearly cheaper, stock move stands", 2000, busy, []Pod{a30Prefill}, true, ReasonStockSplit},
+		{"A30 pair busy huge report: stock move stands", 6000, busy, []Pod{a30Prefill}, true, ReasonStockSplit},
+		{"A30 pair idle long doc: overrules to keep", 2000, idle, []Pod{a30Prefill}, false, ReasonOverrideKeep},
+		{"A30 decode, Gaudi prefill, long doc: stock move stands", 2000, busy, []Pod{gaudiPrefill}, true, ReasonStockSplit},
+		{"Gaudi decode, A30 prefill, long doc: overrules to keep", 2000, gaudiDecode, []Pod{a30Prefill}, false, ReasonOverrideKeep},
+		{"A30 decode, Gaudi prefill, medium doc: 17% is not sure enough", 700, busy, []Pod{gaudiPrefill}, false, ReasonStockKeep},
+		{"short prompt never moves", 100, busy, []Pod{gaudiPrefill}, false, ReasonShortPrompt},
+		{"kv full", 2000, full, []Pod{a30Prefill}, false, ReasonDecodeKVFull},
+		{"no reader", 2000, busy, nil, false, ReasonNoPrefillCandidate},
+		{"unprofiled decode: stock answer stands", 2000, Pod{Name: "h100", Class: "nvidia-h100", Running: 32}, []Pod{a30Prefill}, true, ReasonStockSplit},
+		{"unprofiled reader: stock answer stands", 700, busy, []Pod{{Name: "mi300", Class: "amd-mi300x"}}, false, ReasonStockKeep},
+		{"unprofiled reader, long doc: stock move stands", 2000, busy, []Pod{{Name: "mi300", Class: "amd-mi300x"}}, true, ReasonStockSplit},
+		{"nothing uncached", 0, busy, []Pod{a30Prefill}, false, ReasonShortPrompt},
+		{"decode disabled", 2000, Pod{Name: "off", Class: classA30, Disabled: true}, []Pod{a30Prefill}, false, ReasonDecodeDisabled}, {"queued decode pod: queue counts for both paths, chat stays", 300, queuedBusy, []Pod{a30Prefill}, false, ReasonStockKeep},
+		{"queued decode pod: medium doc stays", 700, queuedBusy, []Pod{a30Prefill}, false, ReasonStockKeep},
+		{"queued decode pod, idle Gaudi: 900 tokens still moves on speed", 900, queuedBusy, []Pod{gaudiPrefill}, true, ReasonOverrideMove},
+	}
+	for _, tc := range cases {
+		d := Decide(c, tc.tokens, tc.decode, tc.prefill)
+		if d.Remote != tc.remote || d.Reason != tc.reason || d.Strategy != StrategyAuto {
+			t.Errorf("%s: got remote=%v reason=%s (keep %.3f+stall %.3f, move %.3f), want %v %s",
+				tc.name, d.Remote, d.Reason, d.LocalSeconds, d.StallSeconds, d.RemoteSeconds, tc.remote, tc.reason)
+		}
+	}
+	// A clearly cheaper move overrules a stock keep: busy A30 decode, idle Gaudi reader, 900 tokens, fast link.
+	c.BandwidthGbps = 100
+	c.HandoffOverheadMs = 20
+	c.StallFraction = 0.3
+	d := Decide(c, 900, busy, []Pod{gaudiPrefill})
+	if !d.Remote || d.Reason != ReasonOverrideMove || d.Prefill != "gaudi-prefill" {
+		t.Errorf("override move: got %+v", d)
+	}
+	// ...but not when the move would miss the SLO.
+	c.TTFTSLOMs = 50
+	if d := Decide(c, 900, busy, []Pod{gaudiPrefill}); d.Remote || d.Reason != ReasonStockKeep {
+		t.Errorf("override move past SLO: got %+v", d)
+	}
+	// Margin 0 overrules on any saving.
+	c.TTFTSLOMs = 0
+	c.OverrideMargin = 0
+	c.BandwidthGbps, c.HandoffOverheadMs, c.StallFraction = 10, 82, 0.1
+	if d := Decide(c, 700, busy, []Pod{gaudiPrefill}); !d.Remote || d.Reason != ReasonOverrideMove {
+		t.Errorf("margin 0: got %+v", d)
+	}
+}
+
+func TestDecideGuardedStockUnprofiledReaderIsStock(t *testing.T) {
+	c, idle, _ := calibratedA30Pair(StrategyGuardedStock)
+	d := Decide(c, 2000, idle, []Pod{{Name: "mi300", Class: "amd-mi300x"}})
+	if !d.Remote || d.Reason != ReasonStockSplit || d.Prefill != "mi300" {
+		t.Fatalf("got %+v", d)
 	}
 }

@@ -8,5 +8,5 @@ resources:
   - decode-gaudi3.yaml
 images:
   - name: REPLACE_GAUDI_VLLM_IMAGE
-    newName: quay.io/REPLACE_ME/vllm-gaudi-nixl
-    newTag: v0.26.0
+    newName: image-registry.openshift-image-registry.svc:5000/hetero-pd-lab/vllm-gaudi-nixl
+    newTag: v0.26.0-tfpin   # v0.26.0 + transformers pinned to the A30 image version

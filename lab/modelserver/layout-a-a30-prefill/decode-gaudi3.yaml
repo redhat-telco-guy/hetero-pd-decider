@@ -5,7 +5,9 @@ kind: Deployment
 metadata:
   name: decode-gaudi3
 spec:
-  replicas: 2
+  replicas: 1   # was 2; Gaudi at 0000:15:00.0 fails DRAM init (hardware). Restore to 2 once fixed.
+  strategy:
+    type: Recreate   # one Gaudi card: stop the old pod before starting the new one
   selector:
     matchLabels:
       app: decode-gaudi3
@@ -17,7 +19,7 @@ spec:
         llm-d.ai/guide: hetero-pd
         llm-d.ai/role: decode
         llm-d.ai/accelerator-class: intel-gaudi3
-        llm-d.ai/model-fingerprint: llama-3.1-8b-instruct-bf16
+        llm-d.ai/model-fingerprint: qwen2.5-7b-instruct-bf16
     spec:
       serviceAccountName: hetero-pd
       initContainers:
@@ -42,12 +44,14 @@ spec:
           image: REPLACE_GAUDI_VLLM_IMAGE
           command: ["vllm", "serve"]
           args:
-            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "Qwen/Qwen2.5-7B-Instruct"
             - "--port=8200"
             - "--tensor-parallel-size=1"
             - "--dtype=bfloat16"
             - "--block-size=128"
             - "--max-model-len=8192"
+            - "--gpu-memory-utilization=0.6"    # leave HBM for HPU graphs (PT_DEVMEM OOM at 0.9 and 0.75)
+            - "--max-num-seqs=64"               # caps decode graph buckets; lab load targets ~30-40 running
             - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
             - "--kv-transfer-config"
             - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","enable_permute_local_kv":true}'
@@ -71,6 +75,8 @@ spec:
               value: "true"
             - name: PT_HPU_ENABLE_RESTORE_KV_LAYOUT
               value: "1"
+            - name: VLLM_GRAPH_RESERVED_MEM     # share of free HBM kept for HPU graphs (default 0.1)
+              value: "0.3"
             - name: PT_HPU_LAZY_MODE
               value: "1"
           ports:
@@ -94,10 +100,10 @@ spec:
           resources:
             requests:
               cpu: "16"
-              memory: 96Gi
+              memory: 150Gi   # was 192Gi; lowered so 2 replicas fit without overcommitting worker2
               habana.ai/gaudi: "1"
             limits:
-              memory: 128Gi
+              memory: 230Gi   # was 320Gi (2 replicas overcommitted the node).   NIXL cpu KV buffer + model; worker2 has ~500 GB (Host malloc failed at 128Gi)
               habana.ai/gaudi: "1"
           volumeMounts:
             - mountPath: /dev/shm

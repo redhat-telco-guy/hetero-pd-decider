@@ -1,0 +1,12 @@
+# Site-specific placement for the ai154 lab: keep the router on worker1.
+# worker2 rebooted after a Gaudi overheat and Envoy crash-loops there. Remove once worker2 is repaired.
+router:
+  epp:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: ["worker1.ai154.dl154.dfw.ocp.run"]

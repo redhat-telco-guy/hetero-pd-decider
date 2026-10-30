@@ -1,0 +1,812 @@
+<meta charset="utf-8">
+<title>Hetero-PD Decider Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a lab notebook — sticky tab bar, one working surface per tab, instruments (sliders) left, readouts right. */
+:root{
+  --bg:#f5f6f4; --surface:#ffffff; --ink:#1b2321; --muted:#5d6966; --line:#d9dedb;
+  --prefill:#0f7c74; --prefill-soft:#d5ece9;
+  --decode:#b8640c; --decode-soft:#f6e6d2;
+  --router:#4b4fb0; --router-soft:#e3e4f6;
+  --ok:#2f7d3a; --warn:#a46a00; --bad:#b3261e; --grid:#e7ebe9;
+  --f-display:"Schibsted Grotesk","Helvetica Neue",Arial,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --r:8px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#121615; --surface:#1a201e; --ink:#e6ebe9; --muted:#9aa6a2; --line:#2e3734;
+  --prefill:#4cc2b6; --prefill-soft:#173a37; --decode:#f0a04b; --decode-soft:#3d2a14;
+  --router:#9da1f2; --router-soft:#262844; --ok:#6cc47a; --warn:#e2b04a; --bad:#f2827a; --grid:#252d2a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121615; --surface:#1a201e; --ink:#e6ebe9; --muted:#9aa6a2; --line:#2e3734;
+  --prefill:#4cc2b6; --prefill-soft:#173a37; --decode:#f0a04b; --decode-soft:#3d2a14;
+  --router:#9da1f2; --router-soft:#262844; --ok:#6cc47a; --warn:#e2b04a; --bad:#f2827a; --grid:#252d2a; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.5}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.wrap{max-width:1180px;margin-inline:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 48px}
+header.top{display:flex;flex-wrap:wrap;align-items:end;justify-content:space-between;gap:12px 24px;padding-bottom:14px}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(1.6rem,3.4vw,2.3rem);letter-spacing:-.01em;margin:0;text-wrap:balance}
+.sub{color:var(--muted);margin:4px 0 0;max-width:62ch}
+.stamp{font-family:var(--f-mono);font-size:.78rem;color:var(--muted);text-align:right}
+nav.tabs{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--line);margin-bottom:22px}
+nav.tabs button{font:500 .92rem var(--f-body);color:var(--muted);background:none;border:0;border-bottom:2px solid transparent;padding:10px 12px;cursor:pointer;white-space:nowrap}
+nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--router)}
+nav.tabs button:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--router);outline-offset:2px}
+h2{font-family:var(--f-display);font-weight:700;font-size:1.3rem;margin:0 0 6px;text-wrap:balance}
+h3{font-family:var(--f-display);font-weight:500;font-size:1.02rem;margin:0 0 8px}
+p{margin:0 0 10px;max-width:68ch}
+.muted{color:var(--muted)}
+.small{font-size:.84rem}
+.mono{font-family:var(--f-mono)}
+.num{font-variant-numeric:tabular-nums}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr));gap:12px}
+.grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,10.5rem),1fr));gap:10px}
+.flow{display:flex;flex-direction:column;align-items:stretch;gap:0;max-width:820px}
+.fstep{display:grid;grid-template-columns:minmax(0,1fr) 96px minmax(0,15rem);align-items:center;gap:0}
+.fq{border:1.5px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 14px;position:relative}
+.fq .n{font:600 .72rem var(--f-body);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.fq .q{font-weight:600;margin:2px 0}
+.fq .h{font-size:.84rem;color:var(--muted)}
+.fyes{display:flex;align-items:center;justify-content:center;font:600 .78rem var(--f-body);color:var(--muted);position:relative;height:100%}
+.fyes::before{content:"";position:absolute;left:0;right:0;top:50%;border-top:1.5px solid var(--line)}
+.fyes span{background:var(--bg);padding:0 6px;position:relative}
+.fout{border-radius:10px;padding:8px 12px;font-size:.86rem;border:1.5px solid}
+.fout b{display:block;font-family:var(--f-display)}
+.fout code{font-size:.78rem}
+.o-local{border-color:var(--decode);background:var(--decode-soft)}
+.o-split{border-color:var(--prefill);background:var(--prefill-soft)}
+.o-calc{border-color:var(--router);background:var(--router-soft)}
+.o-fall{border-color:var(--line);background:var(--grid)}
+.fno{height:30px;display:grid;grid-template-columns:minmax(0,1fr) 96px minmax(0,15rem)}
+.fno div{position:relative}
+.fno div::before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1.5px solid var(--line)}
+.fno div::after{content:"no";position:absolute;left:calc(50% + 8px);top:6px;font:600 .74rem var(--f-body);color:var(--muted)}
+.fno.plain div::after{content:""}
+.fstep.on .fq{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+.fstep.hit .fq{border-color:var(--router);box-shadow:0 0 0 2px var(--router)}
+.fstep.hit .fyes{color:var(--router)} .fstep.hit .fyes::before{border-top-color:var(--router)}
+.fstep.hit .fout{box-shadow:0 0 0 2px var(--router)}
+.fstep.dim{opacity:.45}
+.fend{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:820px;margin-top:4px}
+.fend .fout.hit{box-shadow:0 0 0 2px var(--router)}
+@media (max-width:640px){.fstep,.fno{grid-template-columns:minmax(0,1fr) 44px minmax(0,9rem)}.fyes span{font-size:.7rem}}
+.tabsep{align-self:center;font:600 .7rem var(--f-body);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 4px 0 18px;white-space:nowrap;border-left:1px solid var(--line);margin-left:6px}
+.hero{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:24px;align-items:center}
+@media (max-width:820px){.hero{grid-template-columns:1fr}}
+.thesis{font-family:var(--f-display);font-weight:700;font-size:clamp(1.35rem,2.6vw,1.9rem);line-height:1.2;margin:0 0 10px;text-wrap:balance}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:12px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px}
+.kpi .v{font-family:var(--f-display);font-weight:700;font-size:2.3rem;line-height:1.05;color:var(--prefill)}
+.kpi .l{font-weight:600;margin:4px 0 2px}
+.kpi .d{font-size:.84rem;color:var(--muted)}
+.tag{display:inline-block;font:600 .7rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px;vertical-align:middle}
+.lane{display:grid;grid-template-columns:7.5rem minmax(0,1fr);gap:8px;align-items:center;margin:6px 0}
+.lane .who{font-size:.82rem;color:var(--muted);text-align:right}
+.track{display:flex;height:30px;border-radius:6px;overflow:hidden;background:var(--grid)}
+.track div{display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:600;white-space:nowrap;overflow:hidden;color:var(--ink)}
+.t-ans{background:var(--decode-soft);border-right:2px solid var(--surface)}
+.t-read{background:var(--bad);color:#fff!important}
+.t-pre{background:var(--prefill-soft);border-right:2px solid var(--surface)}
+.t-idle{background:transparent}
+.ba h3{margin:14px 0 4px}
+.q3{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr));gap:12px;counter-reset:q}
+.q3 .qq{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;position:relative}
+.q3 .qq b{display:block;font-family:var(--f-display);font-size:1.02rem;margin-bottom:4px}
+.q3 .qq .k{font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.verdict2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.verdict2 div{border-radius:var(--r);padding:12px 14px;font-size:.92rem}
+.proof{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.proof li{display:grid;grid-template-columns:7.2rem minmax(0,1fr);gap:12px;align-items:start;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+.proof li b{display:block}
+.proof li span.x{font-size:.86rem;color:var(--muted)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px;min-width:0}
+.stack{display:flex;flex-direction:column;gap:16px}
+section[hidden]{display:none}
+.chip{display:inline-flex;align-items:center;gap:6px;font:500 .78rem var(--f-body);padding:2px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.chip::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.s-ok,.s-done{color:var(--ok)} .s-down,.s-blocked{color:var(--bad)} .s-running,.s-review{color:var(--warn)} .s-fail{color:var(--bad)} .s-pending{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th{text-align:left;font-weight:600;color:var(--muted);font-size:.78rem;letter-spacing:.03em;text-transform:uppercase;border-bottom:1px solid var(--line);padding:6px 8px}
+td{border-bottom:1px solid var(--grid);padding:7px 8px;vertical-align:top}
+.tablebox{overflow-x:auto}
+code,.code{font-family:var(--f-mono);font-size:.86em;background:var(--grid);padding:1px 5px;border-radius:4px}
+.formula{font-family:var(--f-mono);font-size:.9rem;line-height:1.9;background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;overflow-x:auto;white-space:pre}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:.82rem;color:var(--muted)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px}
+/* simulator */
+.sim{display:grid;grid-template-columns:minmax(0,340px) minmax(0,1fr);gap:16px}
+@media (max-width:820px){.sim{grid-template-columns:1fr}}
+.ctl{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin-bottom:10px}
+.ctl label{font-size:.85rem}
+.ctl output{font-family:var(--f-mono);font-size:.82rem;color:var(--muted);text-align:right;min-width:5.5ch}
+.ctl input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--router)}
+.ctl select{grid-column:1/-1;font:inherit;font-size:.85rem;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
+fieldset{border:0;border-top:1px solid var(--line);padding:10px 0 0;margin:10px 0 0}
+legend{font:600 .76rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:0 6px 0 0}
+.verdict{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px}
+.verdict .big{font-family:var(--f-display);font-weight:700;font-size:1.55rem}
+.v-remote{color:var(--prefill)} .v-local{color:var(--decode)} .v-other{color:var(--muted)}
+.policy{border:1px solid var(--line);border-radius:var(--r);padding:12px;background:var(--surface)}
+.policy .name{font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.policy .pick{font-family:var(--f-display);font-weight:700;font-size:1.1rem;margin:2px 0 6px}
+.policy.best{border-color:var(--router);box-shadow:inset 0 0 0 1px var(--router)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:.84rem}
+.kv dt{color:var(--muted)} .kv dd{margin:0;text-align:right;font-family:var(--f-mono)}
+svg text{fill:var(--muted);font-family:var(--f-body);font-size:11px}
+.tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:.8rem;box-shadow:0 6px 18px rgba(0,0,0,.14);max-width:260px;z-index:3}
+.rel{position:relative}
+.bignum{font-family:var(--f-display);font-weight:700;font-size:1.7rem;line-height:1.1}
+.note{border-left:3px solid var(--warn);padding:6px 10px;background:var(--surface);border-radius:0 6px 6px 0;font-size:.86rem}
+.inputs{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:10px}
+.inputs label{display:flex;flex-direction:column;font-size:.82rem;color:var(--muted);gap:3px}
+.inputs input{font:inherit;font-family:var(--f-mono);font-size:.9rem;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);width:100%;box-sizing:border-box}
+@media (prefers-reduced-motion:no-preference){.bar{transition:width .25s ease}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Hetero-PD Decider Lab</h1>
+      <p class="sub">A smarter traffic router for AI inference on mixed NVIDIA and Intel hardware.</p>
+    </div>
+    <div class="stamp" id="stamp">results: loading…</div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="t-overview" aria-controls="overview" aria-selected="true">Overview</button>
+    <span class="tabsep" aria-hidden="true">Engineering detail</span>
+    <button role="tab" id="t-live" aria-controls="live" aria-selected="false">Live</button>
+    <button role="tab" id="t-how" aria-controls="how" aria-selected="false">Architecture</button>
+    <button role="tab" id="t-logic" aria-controls="logic" aria-selected="false">Decision steps</button>
+    <button role="tab" id="t-sim" aria-controls="sim" aria-selected="false">Simulator</button>
+    <button role="tab" id="t-results" aria-controls="results" aria-selected="false">Lab results</button>
+    <button role="tab" id="t-value" aria-controls="value" aria-selected="false">Value calculator</button>
+  </nav>
+
+  <!-- OVERVIEW -->
+  <section id="overview" role="tabpanel" aria-labelledby="t-overview" class="stack">
+    <div class="panel hero">
+      <div>
+        <p class="thesis">Let lower-cost NVIDIA cards read the long prompts, so the premium Intel Gaudi cards spend their time writing answers.</p>
+        <p>Every AI request has two jobs: <b>reading</b> the prompt and <b>writing</b> the answer. When one card does both, a single long document makes every other user on that card freeze mid-answer. Our router looks at each request as it arrives and instantly decides which card should do the reading.</p>
+        <p class="muted small">Stock llm-d uses one fixed size cutoff for every request. Ours knows how fast each card is, how busy it is, and how long the network handoff takes.</p>
+      </div>
+      <div class="ba">
+        <h3>Without our router</h3><p class="small muted" style="margin:0 0 2px">A long document arrives. The Gaudi stops answering everyone to read it.</p>
+        <div class="lane"><span class="who">Gaudi (answers)</span><div class="track"><div class="t-ans" style="flex:3">answering</div><div class="t-read" title="The Gaudi reads a long prompt; every user on the card waits" style="flex:2">users wait</div><div class="t-ans" style="flex:3">answering</div></div></div>
+        <div class="lane"><span class="who">NVIDIA A30</span><div class="track"><div class="t-idle" style="flex:1"></div></div></div>
+        <h3>With our router</h3>
+        <div class="lane"><span class="who">Gaudi (answers)</span><div class="track"><div class="t-ans" style="flex:1">answering without interruption</div></div></div>
+        <div class="lane"><span class="who">NVIDIA A30</span><div class="track"><div class="t-pre" style="flex:2">reads prompt</div><div class="t-idle" style="flex:1"></div><div class="t-pre" style="flex:2">reads prompt</div><div class="t-idle" style="flex:3"></div></div></div>
+        <p class="small muted">Illustration. The prompt's working memory moves from the A30 to the Gaudi in a few milliseconds.</p>
+      </div>
+    </div>
+
+    <div>
+      <h2>The value <span class="tag">projected</span></h2>
+      <p class="small muted" id="ovBasis">—</p>
+      <div class="kpis">
+        <div class="kpi"><div class="v num" id="ovOut">—</div><div class="l">more answers from the same hardware</div><div class="d" id="ovOutD">—</div></div>
+        <div class="kpi"><div class="v num" id="ovFreeze">—</div><div class="l">fewer mid-answer freezes for users</div><div class="d" id="ovFreezeD">—</div></div>
+        <div class="kpi"><div class="v num" id="ovDollars">—</div><div class="l">capacity value per year</div><div class="d" id="ovDollarsD">—</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>How it decides, in three questions</h2>
+      <div class="q3">
+        <div class="qq"><span class="k">1 · Size</span><b>Is the prompt big enough to be worth moving?</b>Short chat messages stay where they are. Moving them costs more than it saves.</div>
+        <div class="qq"><span class="k">2 · Load</span><b>How many users would wait if the answering card read it?</b>The busier the Gaudi card, the more a long read hurts. The router reads this live, every second.</div>
+        <div class="qq"><span class="k">3 · Speed and deadline</span><b>Is moving it faster overall, and still on time?</b>It adds up the NVIDIA card's read time and the network handoff, and checks the 1-second response target.</div>
+      </div>
+      <div class="verdict2">
+        <div class="o-split" style="border:1.5px solid var(--prefill)"><b>Move the reading to the NVIDIA card</b> when it is clearly faster for everyone and meets the deadline.</div>
+        <div class="o-local" style="border:1.5px solid var(--decode)"><b>Keep it on the Gaudi card</b> when the prompt is short, the Gaudi is idle, or moving would miss the deadline.</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h2>What's proven so far</h2>
+        <ul class="proof" id="ovProof"></ul>
+      </div>
+      <div class="panel">
+        <h2>What's next</h2>
+        <ol class="small" style="padding-left:1.2rem;margin:0;display:flex;flex-direction:column;gap:8px">
+          <li><b>Repair the Gaudi server.</b> Both Intel cards in the lab are down (one overheated, one faulty). The lab owner has the hardware report.</li>
+          <li><b>Confirm identical answers across NVIDIA and Intel.</b> One test, about 15 minutes, once the Gaudi is back.</li>
+          <li><b>Measure the savings.</b> Run our router against stock llm-d on the same traffic. This replaces the projected numbers above with measured ones.</li>
+        </ol>
+        <p class="small muted" style="margin-top:12px">Engineering detail, live router metrics and the full calculator are in the tabs above.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- LIVE -->
+  <section id="live" role="tabpanel" aria-labelledby="t-live" class="stack" hidden>
+    <div class="panel" id="liveOff">
+      <h2>Live view</h2>
+      <p class="muted">The live view reads the router and the model servers directly, so it works only when this page is opened from the cluster (the <code>hetero-pd-dashboard</code> route in <code>hetero-pd-lab</code>).</p>
+    </div>
+    <div class="stack" id="liveOn" hidden>
+      <div class="panel">
+        <div class="verdict"><h2 style="margin:0">Router, right now</h2><span class="chip s-ok" id="lvStatus">connecting</span></div>
+        <p class="small muted" id="lvLine">—</p>
+      </div>
+      <div class="grid4" id="lvTiles"></div>
+      <div class="grid2">
+        <div class="panel rel">
+          <h3>Decisions per 10 seconds, by reason</h3>
+          <p class="small muted">From <code>llm_d_epp_hetero_pd_decision_total</code>. Teal reasons split the request; amber ones keep it local.</p>
+          <svg id="lvDec" viewBox="0 0 560 220" width="100%" role="img" aria-label="Decisions over time"></svg>
+          <div class="legend" id="lvDecLegend"></div>
+        </div>
+        <div class="panel rel">
+          <h3>Streams running per pod</h3>
+          <p class="small muted">When a long prompt prefills locally, the decode pod's streams pause. This is the load the decider reads.</p>
+          <svg id="lvRun" viewBox="0 0 560 220" width="100%" role="img" aria-label="Running streams per pod over time"></svg>
+          <div class="legend" id="lvRunLegend"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Model servers (last 30 seconds)</h3>
+        <div class="tablebox"><table id="lvPods"><thead><tr><th>Pod</th><th>Role</th><th>Running</th><th>Waiting</th><th>KV cache</th><th>Prompt tok/s</th><th>Output tok/s</th><th>KV received tok/s</th><th>Avg TTFT</th><th>Avg ITL</th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="panel">
+        <h3>All decisions since the router started</h3>
+        <div class="tablebox"><table id="lvReasons"><thead><tr><th>Reason</th><th>Path</th><th>Count</th><th>Share</th></tr></thead><tbody></tbody></table></div>
+        <p class="small muted" id="lvStock"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section id="how" role="tabpanel" aria-labelledby="t-how" class="stack" hidden>
+    <div class="panel">
+      <h2>One request, two paths</h2>
+      <p class="muted">Every request reaches the router (llm-d EPP) first. Your plugin, <code>hetero-pd-decider</code>, is the step that chooses between the two paths below.</p>
+      <div class="tablebox"><svg id="arch" viewBox="0 0 1000 352" width="100%" role="img" aria-label="Request flow from client through router to Gaudi decode, with optional A30 prefill and NIXL KV transfer"></svg></div>
+      <div class="legend"><span><i style="background:var(--router)"></i>router and your decider</span><span><i style="background:var(--prefill)"></i>prefill (A30)</span><span><i style="background:var(--decode)"></i>decode (Gaudi 3)</span></div>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Why the split matters</h3>
+        <p>Prefill reads the whole prompt at once. It's compute-heavy and bursty. Decode generates one token at a time for every running stream, and it's memory-bound and steady. When a long prompt prefills <em>on a busy decode card</em>, every stream on that card stalls until it finishes. Users see that as a freeze in their chat.</p>
+        <p>Moving the prefill to another card avoids the stall, but it costs a hop: the other card's prefill time plus shipping the KV cache over the network.</p>
+      </div>
+      <div class="panel">
+        <h3>What stock llm-d does vs. what yours does</h3>
+        <table>
+          <thead><tr><th></th><th>Stock (prefix-based)</th><th>hetero-pd-decider</th></tr></thead>
+          <tbody>
+            <tr><td>Rule</td><td>Split if uncached tokens ≥ <span class="mono" id="stockThr">1024</span></td><td>Split if the remote path is faster, counting the stall</td></tr>
+            <tr><td>Knows card speeds</td><td>No</td><td>Yes, a measured profile per class</td></tr>
+            <tr><td>Knows decode load</td><td>No</td><td>Yes: running, waiting, KV use</td></tr>
+            <tr><td>Knows link speed</td><td>No</td><td>Yes, from the bandwidth setting</td></tr>
+            <tr><td>Latency target</td><td>No</td><td>Yes, keeps local if remote misses the SLO</td></tr>
+            <tr><td>Mixed vendors</td><td>Treats all pods alike</td><td>Separate profiles; checks model fingerprint</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOGIC -->
+  <section id="logic" role="tabpanel" aria-labelledby="t-logic" class="stack" hidden>
+    <div class="panel">
+      <h2>How the decider thinks, step by step</h2>
+      <p class="muted">For every request the router asks these questions in order. The first "yes" ends it. If every answer is "no", it compares the two paths and picks the faster one. The path highlighted below is the request currently set in the Simulator tab.</p>
+      <p class="small" id="flowNow">—</p>
+      <div class="flow" id="flow">
+        <div class="fstep" data-step="short"><div class="fq"><div class="n">Step 1 · Is it worth a hop?</div><div class="q">Is the new part of the prompt shorter than 256 tokens?</div><div class="h">Tokens already cached on the decode card don't count.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-local"><b>Keep on decode card</b><code>short-prompt</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="disabled"><div class="fq"><div class="n">Step 2 · Is the decode card opted out?</div><div class="q">Is the decode pod labelled as not taking transfers?</div><div class="h">An operator switch: <code>llm-d.ai/hetero-pd-disabled</code>.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-local"><b>Keep on decode card</b><code>decode-disabled</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="kvfull"><div class="fq"><div class="n">Step 3 · Is there room to receive?</div><div class="q">Is the decode card's KV cache 90% full or more?</div><div class="h">A transfer needs free cache space to land in.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-local"><b>Keep on decode card</b><code>decode-kv-full</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="profile"><div class="fq"><div class="n">Step 4 · Do we know this card's speed?</div><div class="q">Is there no measured prefill speed for the decode card?</div><div class="h">Without it the router can't estimate anything.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-fall"><b>Use the stock rule</b>split if ≥ 1,024 new tokens · <code>missing-profile</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="nocand"><div class="fq"><div class="n">Step 5 · Is there a partner card?</div><div class="q">Is there no usable prefill card?</div><div class="h">It must be up, not opted out, have a measured speed, and serve the same model build.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-local"><b>Keep on decode card</b><code>no-prefill-candidate</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="calc"><div class="fq"><div class="n">Step 6 · Estimate both paths</div><div class="q">How long would each path take?</div><div class="h"><b>Remote</b> = A30 reads the prompt + its queue + ship the KV cache over the network.<br><b>Local</b> = decode card reads the prompt + its queue.<br><b>Stall</b> = how long the decode card's running streams would freeze if it reads the prompt itself.</div></div><div class="fyes"><span>then</span></div><div class="fout o-calc"><b>Three numbers</b>remote, local, stall</div></div>
+        <div class="fno plain"><div></div></div>
+        <div class="fstep" data-step="slo"><div class="fq"><div class="n">Step 7 · Would the remote path be too slow?</div><div class="q">Is the remote estimate over the 1,000 ms time-to-first-token target?</div><div class="h">Never accept a split that would itself break the latency target.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-local"><b>Keep on decode card</b><code>remote-misses-slo</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="compare"><div class="fq"><div class="n">Step 8 · The final comparison</div><div class="q">Is remote at least 10% faster than local plus a quarter of the stall?</div><div class="h">remote &lt; 0.9 × (local + 0.25 × stall). The stall counts because every running user feels it.</div></div><div class="fyes"><span>yes</span></div><div class="fout o-split"><b>Split</b>A30 reads the prompt, KV ships to the decode card · <code>remote-better</code></div></div>
+        <div class="fno"><div></div></div>
+        <div class="fstep" data-step="local"><div class="fq"><div class="n">Otherwise</div><div class="q">The decode card is fast or idle enough to do it itself.</div></div><div class="fyes"><span></span></div><div class="fout o-local"><b>Keep on decode card</b><code>local-better</code></div></div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <h3>The three estimates</h3>
+<div class="formula">U        = prompt tokens not already cached on the decode pod
+remote   = U / R_prefill  +  waiting_P × Q / R_prefill  +  U × kvBytes / bandwidth
+local    = U / R_decode   +  waiting_D × Q / R_decode
+stall    = running_D × U / R_decode       <span class="muted">(stream-seconds frozen)</span>
+
+split when  remote ≤ SLO
+       and  remote &lt; (1 − margin) × (local + w × stall)</div>
+        <p class="small muted">R is a card's measured prefill speed in tokens per second. Q is <code>avgQueuedPromptTokens</code>, the work assumed behind each waiting request. With several prefill pods, the one with the lowest remote estimate is used.</p>
+      </div>
+      <div class="panel">
+        <h3>Parameters in this lab</h3>
+        <div class="tablebox"><table id="params"><thead><tr><th>Parameter</th><th>Value</th><th>Meaning</th></tr></thead><tbody></tbody></table></div>
+        <p class="note small" id="paramNote">Prefill speeds and bandwidth are placeholders until step 5 (<code>profile_prefill.py</code>, <code>measure_link.sh</code>) measures them on this hardware.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- SIMULATOR -->
+  <section id="sim" role="tabpanel" aria-labelledby="t-sim" class="stack" hidden>
+    <div class="sim">
+      <div class="panel" id="controls">
+        <h2>Set the scene</h2>
+        <p class="small muted">Same math as the plugin. Defaults are this lab's settings.</p>
+        <fieldset><legend>The new request</legend>
+          <div class="ctl"><label for="u">Prompt tokens</label><output for="u" id="u-o"></output><input type="range" id="u" min="0" max="8000" step="50" value="2600"></div>
+          <div class="ctl"><label for="c">Already cached on decode pod</label><output for="c" id="c-o"></output><input type="range" id="c" min="0" max="8000" step="50" value="0"></div>
+        </fieldset>
+        <fieldset><legend>Decode pod (Gaudi 3)</legend>
+          <div class="ctl"><label for="nr">Streams running</label><output for="nr" id="nr-o"></output><input type="range" id="nr" min="0" max="64" step="1" value="32"></div>
+          <div class="ctl"><label for="nw">Requests waiting</label><output for="nw" id="nw-o"></output><input type="range" id="nw" min="0" max="16" step="1" value="2"></div>
+          <div class="ctl"><label for="kv">KV cache in use</label><output for="kv" id="kv-o"></output><input type="range" id="kv" min="0" max="1" step="0.01" value="0.4"></div>
+        </fieldset>
+        <fieldset><legend>Prefill pod (A30)</legend>
+          <div class="ctl"><label for="pw">Requests waiting</label><output for="pw" id="pw-o"></output><input type="range" id="pw" min="0" max="16" step="1" value="0"></div>
+        </fieldset>
+        <fieldset><legend>Hardware and tuning</legend>
+          <div class="ctl"><label for="ra">A30 prefill speed (tok/s)</label><output for="ra" id="ra-o"></output><input type="range" id="ra" min="1000" max="20000" step="250" value="5000"></div>
+          <div class="ctl"><label for="rg">Gaudi 3 prefill speed (tok/s)</label><output for="rg" id="rg-o"></output><input type="range" id="rg" min="2000" max="60000" step="500" value="20000"></div>
+          <div class="ctl"><label for="bw">A30 → Gaudi link (Gbps)</label><output for="bw" id="bw-o"></output><input type="range" id="bw" min="1" max="200" step="1" value="10"></div>
+          <div class="ctl"><label for="slo">TTFT target (ms, 0 = off)</label><output for="slo" id="slo-o"></output><input type="range" id="slo" min="0" max="3000" step="50" value="1000"></div>
+          <div class="ctl"><label for="w">Stall weight w</label><output for="w" id="w-o"></output><input type="range" id="w" min="0" max="1" step="0.05" value="0.25"></div>
+          <div class="ctl"><label for="m">Safety margin</label><output for="m" id="m-o"></output><input type="range" id="m" min="0" max="0.5" step="0.01" value="0.1"></div>
+          <div class="ctl"><label for="st">Stock threshold (tokens)</label><output for="st" id="st-o"></output><input type="range" id="st" min="0" max="4096" step="64" value="1024"></div>
+        </fieldset>
+      </div>
+
+      <div class="stack" style="min-width:0">
+        <div class="panel">
+          <div class="verdict"><span class="big" id="vBig">—</span><span class="chip" id="vReason">—</span></div>
+          <p class="small muted" id="vWhy">—</p>
+          <div class="rel"><svg id="bars" viewBox="0 0 640 170" width="100%" role="img" aria-label="Remote versus local time estimate"></svg></div>
+        </div>
+        <div class="panel">
+          <h3>Four routers, same request</h3>
+          <p class="small muted">Cost is what the decider minimizes: the new request's time to first token, plus w × the stream-seconds it freezes on the decode card.</p>
+          <div class="grid4" id="policies"></div>
+        </div>
+        <div class="panel rel">
+          <h3>Decision map: prompt length × decode load</h3>
+          <p class="small muted">Each cell is what your decider picks at the settings on the left. The dashed line is the stock rule; cells marked with a dot are where the two disagree.</p>
+          <svg id="map" viewBox="0 0 640 300" width="100%" role="img" aria-label="Decision map"></svg>
+          <div class="legend"><span><i style="background:var(--prefill)"></i>split (remote-better)</span><span><i style="background:var(--decode)"></i>keep local</span><span><i style="background:var(--bad);opacity:.6"></i>local, remote misses SLO</span><span><i style="background:var(--grid)"></i>short prompt</span><span>● disagrees with stock</span></div>
+          <div class="tip" id="mapTip" hidden></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- RESULTS -->
+  <section id="results" role="tabpanel" aria-labelledby="t-results" class="stack" hidden>
+    <div class="panel">
+      <h2>Where the lab stands</h2>
+      <p class="muted" id="resSummary">—</p>
+      <div class="tablebox"><table id="milestones"><thead><tr><th>Step</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Hardware</h3>
+        <div class="tablebox"><table id="hw"><thead><tr><th>Device</th><th>Role</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="panel">
+        <h3>Correctness gate</h3>
+        <p class="small muted">Same prompt down both paths: is the first 64-token output identical? Pass bar 95%.</p>
+        <div class="tablebox"><table id="corr"><thead><tr><th>Layout</th><th>Identical</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>A/B: hetero-pd-decider vs stock</h3>
+      <p class="small muted">Same workload and seed under each router: 32 chat users, long prompts at 0.5/s, a burst at 150 s. Medians of 3 runs.</p>
+      <div class="tablebox"><table id="ab"><thead><tr><th>Metric</th><th>Stock</th><th>Hetero</th><th>Change</th></tr></thead><tbody></tbody></table></div>
+      <p class="small muted" id="abEmpty">Not run yet. This fills in after step 6.</p>
+    </div>
+    <div class="panel">
+      <h3>Decisions by reason</h3>
+      <div id="decWrap"><svg id="dec" viewBox="0 0 640 200" width="100%" role="img" aria-label="Decision counts by reason"></svg></div>
+      <p class="small muted" id="decEmpty">Not run yet. This fills in from <code>decisions.sh</code> after step 6.</p>
+    </div>
+    <p class="small muted">The cluster is on a private network, so this page can't read it directly. Results are written here after each run.</p>
+  </section>
+
+  <!-- VALUE -->
+  <section id="value" role="tabpanel" aria-labelledby="t-value" class="stack" hidden>
+    <div class="panel">
+      <h2>What it's worth</h2>
+      <p class="muted">A model, not a measurement. It runs each router's rule over a traffic mix, using the hardware settings from the Simulator tab, on a fixed fleet of decode and prefill cards. Every second a decode card spends prefilling is a second all its streams produce no tokens. So a router that offloads prefill well gets more output from the same fleet, as long as it stays inside the latency target. The A/B test replaces these estimates with measured numbers.</p>
+      <div class="inputs">
+        <label for="vShortR">Chat prompts per hour, per decode card<input id="vShortR" type="number" min="0" value="12800"></label>
+        <label for="vShortU">Chat prompt tokens<input id="vShortU" type="number" min="0" value="270"></label>
+        <label for="vMidR">Document prompts per hour<input id="vMidR" type="number" min="0" value="600"></label>
+        <label for="vMidU">Document prompt tokens<input id="vMidU" type="number" min="0" value="1200"></label>
+        <label for="vLongR">Long-context prompts per hour<input id="vLongR" type="number" min="0" value="1800"></label>
+        <label for="vLongU">Long-context prompt tokens<input id="vLongU" type="number" min="0" value="2700"></label>
+        <label for="vN">Streams running per decode card<input id="vN" type="number" min="1" value="32"></label>
+        <label for="vTps">Decode speed per stream (tok/s)<input id="vTps" type="number" min="1" value="25"></label>
+        <label for="vND">Decode cards (Gaudi 3)<input id="vND" type="number" min="1" value="8"></label>
+        <label for="vNP">Prefill cards (A30)<input id="vNP" type="number" min="0" value="8"></label>
+        <label for="vPD">Gaudi 3 $/hour per card<input id="vPD" type="number" min="0" step="0.01" value="4.00"></label>
+        <label for="vPP">A30 $/hour per card<input id="vPP" type="number" min="0" step="0.01" value="1.50"></label>
+      </div>
+      <p class="small muted">Traffic defaults are the runbook's A/B workload: 32 chat users with 200-word prompts, plus 2,000-word prompts at 0.5 per second. The $/hour values are example rates; enter your own.</p>
+    </div>
+    <div class="grid3" id="vTiles"></div>
+    <div class="panel">
+      <h3>Per router, per decode card, per hour</h3>
+      <div class="tablebox"><table id="vTable"><thead><tr><th>Router</th><th>Decode time lost to prefill</th><th>Output tokens</th><th>A30 busy</th><th>Streams frozen</th><th>Over TTFT target</th><th>$ per 1M tokens</th></tr></thead><tbody></tbody></table></div>
+      <p class="small muted">Output tokens = (3,600 s − decode time lost) × streams × speed. $ per 1M tokens = whole fleet's $/hour ÷ fleet output. "A30 busy" over 100% means the prefill cards can't keep up, and that router's numbers aren't reachable.</p>
+    </div>
+  </section>
+</div>
+
+<script>
+(function(){
+"use strict";
+// ---------- tabs ----------
+const tabs=[...document.querySelectorAll('nav.tabs [role=tab]')];
+function show(id){
+  tabs.forEach(t=>{const on=t.getAttribute('aria-controls')===id;t.setAttribute('aria-selected',on);document.getElementById(t.getAttribute('aria-controls')).hidden=!on;});
+  if(location.hash.slice(1)!==id) history.replaceState(null,'','#'+id);
+  redraw();
+}
+tabs.forEach(t=>t.addEventListener('click',()=>show(t.getAttribute('aria-controls'))));
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(document.getElementById(h)&&tabs.some(t=>t.getAttribute('aria-controls')===h))show(h);});
+
+// ---------- the decider (port of hetero/decide.go) ----------
+const KV_BYTES=57344, MIN_UNCACHED=256, MAX_KV=0.9, AVGQ=1024;
+function decide(c,U,dec,pre){
+  if(U<c.minUncached||U<=0) return {remote:false,reason:'short-prompt'};
+  if(dec.kv>=c.maxKV) return {remote:false,reason:'decode-kv-full'};
+  const rD=c.rates[dec.cls]; if(!(rD>0)) return {remote:false,fallback:true,reason:'missing-profile'};
+  const local=U/rD+dec.waiting*c.avgQ/rD, stall=dec.running*U/rD;
+  const rP=c.rates[pre.cls]; if(!(rP>0)) return {remote:false,reason:'no-prefill-candidate',local,stall};
+  const transfer=U*c.kvBytes/(c.bw*1e9/8);
+  const prefill=U/rP, queue=pre.waiting*c.avgQ/rP, remote=prefill+queue+transfer;
+  const out={local,stall,remote,transfer,prefill,queue,localQueue:dec.waiting*c.avgQ/rD,localPrefill:U/rD};
+  if(c.slo>0&&remote*1000>c.slo) return Object.assign(out,{remote_:false,reason:'remote-misses-slo'});
+  if(remote<(1-c.margin)*(local+c.w*stall)) return Object.assign(out,{remote_:true,reason:'remote-better'});
+  return Object.assign(out,{remote_:false,reason:'local-better'});
+}
+const $=id=>document.getElementById(id);
+const ids=['u','c','nr','nw','kv','pw','ra','rg','bw','slo','w','m','st'];
+function state(){
+  const v={};ids.forEach(i=>v[i]=Number($(i).value));
+  return {v,cfg:{minUncached:MIN_UNCACHED,maxKV:MAX_KV,avgQ:AVGQ,kvBytes:KV_BYTES,bw:v.bw,slo:v.slo,w:v.w,margin:v.m,rates:{'intel-gaudi3':v.rg,'nvidia-a30':v.ra}},
+    dec:{cls:'intel-gaudi3',running:v.nr,waiting:v.nw,kv:v.kv},pre:{cls:'nvidia-a30',waiting:v.pw}};
+}
+const fmtS=s=>s>=10?s.toFixed(1)+' s':s>=1?s.toFixed(2)+' s':Math.round(s*1000)+' ms';
+const fmtN=d=>Number(d).toLocaleString('en');
+const isSplit=d=>!!d.remote_;
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const NS='http://www.w3.org/2000/svg';
+function el(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(text!=null)e.textContent=text;if(parent)parent.appendChild(e);return e;}
+
+// costs for a policy at one request
+function evalPolicy(split,d,U){
+  // split: KV comes from A30; local: decode card prefills and freezes its streams
+  const ttft=split?d.remote:d.local, freeze=split?0:d.stall;
+  return {ttft,freeze};
+}
+
+function drawSim(){
+  const s=state(), v=s.v;
+  const fmtOut={u:fmtN(v.u),c:fmtN(v.c),nr:v.nr,nw:v.nw,kv:Math.round(v.kv*100)+'%',pw:v.pw,ra:fmtN(v.ra),rg:fmtN(v.rg),bw:v.bw,slo:v.slo?v.slo:'off',w:v.w.toFixed(2),m:Math.round(v.m*100)+'%',st:fmtN(v.st)};
+  ids.forEach(i=>{$(i+'-o').value=fmtOut[i];});
+  $('stockThr').textContent=fmtN(v.st);
+  const U=Math.max(0,v.u-v.c);
+  const d=decide(s.cfg,U,s.dec,s.pre);
+  const split=isSplit(d);
+  const big=$('vBig');
+  big.textContent=split?'Split: A30 prefills, KV ships to Gaudi':'Keep on Gaudi 3';
+  big.className='big '+(split?'v-remote':'v-local');
+  $('vReason').textContent=d.reason;
+  const why={
+    'short-prompt':`Only ${fmtN(U)} uncached tokens, under the ${MIN_UNCACHED}-token minimum. Not worth a hop.`,
+    'decode-kv-full':`Decode KV cache is ${Math.round(v.kv*100)}% full (limit ${MAX_KV*100}%). No room to receive transferred KV.`,
+    'remote-misses-slo':`The remote path would take ${fmtS(d.remote)}, over the ${v.slo} ms target, so the request stays local.`,
+    'remote-better':`Remote ${fmtS(d.remote)} beats (1 − ${v.m}) × (local ${fmtS(d.local)} + ${v.w} × stall ${fmtS(d.stall)}) = ${fmtS((1-v.m)*(d.local+v.w*d.stall))}. Splitting spares ${v.nr} running streams a ${fmtS(d.local)} freeze.`,
+    'local-better':`Remote ${fmtS(d.remote)} doesn't beat the bar of ${fmtS((1-v.m)*(d.local+v.w*d.stall))}. The Gaudi is fast or idle enough to do it itself.`
+  };
+  $('vWhy').textContent=why[d.reason]||'';
+  // bars
+  const svg=$('bars');svg.replaceChildren();
+  if(d.remote!=null){
+    const bar=(1-v.m)*(d.local+v.w*d.stall);
+    const max=Math.max(d.remote,d.local+v.w*d.stall,bar,v.slo/1000||0)*1.08||1;
+    const L=150,W=470,x=t=>L+W*t/max;
+    const rows=[
+      {y:22,label:'Remote (split)',parts:[[d.prefill,css('--prefill'),'A30 prefill'],[d.queue,css('--prefill-soft'),'A30 queue'],[d.transfer,css('--router'),'KV transfer']],total:d.remote},
+      {y:72,label:'Local (Gaudi)',parts:[[d.localPrefill,css('--decode'),'Gaudi prefill'],[d.localQueue,css('--decode-soft'),'Gaudi queue'],[v.w*d.stall,css('--bad'),'w × stall']],total:d.local+v.w*d.stall}
+    ];
+    rows.forEach(r=>{
+      el('text',{x:L-8,y:r.y+15,'text-anchor':'end','font-size':12},svg,r.label);
+      let cx=L;r.parts.forEach(p=>{const w=Math.max(0,x(p[0])-L);if(w>0.3){const rc=el('rect',{x:cx,y:r.y,width:w,height:22,rx:3,fill:p[1]},svg);el('title',{},rc,p[2]+': '+fmtS(p[0]));}cx+=w;});
+      el('text',{x:cx+6,y:r.y+15,'font-size':12,style:'fill:var(--ink)'},svg,fmtS(r.total));
+    });
+    const bx=x(bar);
+    el('line',{x1:bx,x2:bx,y1:12,y2:110,stroke:css('--ink'),'stroke-dasharray':'4 3'},svg);
+    el('text',{x:bx,y:126,'text-anchor':'middle'},svg,'split bar '+fmtS(bar));
+    if(v.slo>0){const sx=x(v.slo/1000);if(sx<L+W+20){el('line',{x1:sx,x2:sx,y1:12,y2:110,stroke:css('--bad'),'stroke-dasharray':'2 3'},svg);el('text',{x:sx,y:144,'text-anchor':'middle',style:'fill:var(--bad)'},svg,'SLO '+v.slo+' ms');}}
+    el('text',{x:L,y:164},svg,'Split when the remote bar ends left of the dashed split bar.');
+  } else {
+    el('text',{x:10,y:40,'font-size':13},svg,'No time estimate needed for this reason.');
+  }
+  // policies
+  const pol=$('policies');pol.replaceChildren();
+  const hasEst=d.remote!=null&&d.local!=null;
+  const stockSplit=U>=v.st&&v.st>0;
+  const list=[
+    {name:'hetero-pd-decider',split:split},
+    {name:'Stock prefix-based',split:stockSplit},
+    {name:'Always split',split:true},
+    {name:'Never split',split:false}
+  ];
+  let best=Infinity;const costs=list.map(p=>{if(!hasEst)return null;const e=evalPolicy(p.split,d,U);const cost=e.ttft+v.w*e.freeze;best=Math.min(best,cost);return Object.assign(e,{cost});});
+  list.forEach((p,i)=>{
+    const card=document.createElement('div');card.className='policy';
+    const e=costs[i];
+    if(e&&Math.abs(e.cost-best)<1e-9)card.classList.add('best');
+    const n=document.createElement('div');n.className='name';n.textContent=p.name;card.appendChild(n);
+    const k=document.createElement('div');k.className='pick '+(p.split?'v-remote':'v-local');k.textContent=p.split?'Split':'Local';card.appendChild(k);
+    if(e){const dl=document.createElement('dl');dl.className='kv';
+      [['TTFT',fmtS(e.ttft)],['Streams frozen',fmtS(e.freeze)+' × '+v.nr],['Cost',fmtS(e.cost)]].forEach(([a,b])=>{const dt=document.createElement('dt');dt.textContent=a;const dd=document.createElement('dd');dd.textContent=b;dl.append(dt,dd);});
+      card.appendChild(dl);}
+    pol.appendChild(card);
+  });
+  drawMap(s);
+}
+
+function drawMap(s){
+  const svg=$('map');svg.replaceChildren();
+  const L=52,T=22,W=570,H=230,xs=40,ys=17,maxU=8000,maxN=64;
+  const cw=W/xs,ch=H/ys;const v=s.v;
+  const tip=$('mapTip');
+  for(let j=0;j<ys;j++){for(let i=0;i<xs;i++){
+    const U=Math.round((i+0.5)*maxU/xs), N=Math.round(j*maxN/(ys-1));
+    const d=decide(s.cfg,U,Object.assign({},s.dec,{running:N}),s.pre);
+    const split=isSplit(d);
+    let fill=d.reason==='short-prompt'?css('--grid'):split?css('--prefill'):d.reason==='remote-misses-slo'?css('--bad'):css('--decode');
+    const op=d.reason==='remote-misses-slo'?0.55:split?0.85:d.reason==='short-prompt'?1:0.7;
+    const y=T+H-(j+1)*ch;
+    const r=el('rect',{x:L+i*cw,y,width:cw-1,height:ch-1,fill,'fill-opacity':op,rx:1.5},svg);
+    const stock=U>=v.st&&v.st>0;
+    if(stock!==split) el('circle',{cx:L+i*cw+cw/2,cy:y+ch/2,r:Math.min(cw,ch)*0.14,fill:css('--ink'),'fill-opacity':.55},svg);
+    r.addEventListener('mousemove',ev=>{const b=svg.parentElement.getBoundingClientRect();tip.hidden=false;
+      tip.textContent=`${fmtN(U)} tokens, ${N} streams running → ${split?'split':'local'} (${d.reason}). Stock: ${stock?'split':'local'}.`;
+      let tx=ev.clientX-b.left+12,ty=ev.clientY-b.top+12;if(tx>b.width-270)tx=Math.max(4,ev.clientX-b.left-270);tip.style.left=tx+'px';tip.style.top=ty+'px';});
+    r.addEventListener('mouseleave',()=>{tip.hidden=true;});
+  }}
+  // axes
+  for(let t=0;t<=8000;t+=2000){const x=L+W*t/maxU;el('text',{x,y:T+H+16,'text-anchor':'middle'},svg,t===0?'0':(t/1000)+'k');}
+  el('text',{x:L+W/2,y:T+H+34,'text-anchor':'middle'},svg,'uncached prompt tokens');
+  for(let n=0;n<=64;n+=16){const y=T+H-(n/maxN)*(H-ch)-ch/2;el('text',{x:L-8,y:y+4,'text-anchor':'end'},svg,String(n));}
+  el('text',{x:14,y:T+H/2,transform:`rotate(-90 14 ${T+H/2})`,'text-anchor':'middle'},svg,'streams running on decode');
+  if(v.st>0&&v.st<=maxU){const x=L+W*v.st/maxU;el('line',{x1:x,x2:x,y1:T,y2:T+H,stroke:css('--ink'),'stroke-width':1.5,'stroke-dasharray':'5 4'},svg);el('text',{x:x,y:T-8,'text-anchor':'middle',style:'fill:var(--ink)'},svg,'stock splits right of '+fmtN(v.st));}
+  // current point
+  const U=Math.max(0,v.u-v.c);if(U<=maxU){const x=L+W*U/maxU,y=T+H-(v.nr/maxN)*(H-ch)-ch/2;el('circle',{cx:x,cy:y,r:6,fill:'none',stroke:css('--ink'),'stroke-width':2},svg);}
+}
+ids.forEach(i=>$(i).addEventListener('input',()=>{drawSim();drawValue();drawFlow();}));
+
+// ---------- architecture ----------
+function drawArch(){
+  const s=$('arch');s.replaceChildren();
+  const box=(x,y,w,h,fill,stroke,title,lines)=>{el('rect',{x,y,width:w,height:h,rx:8,fill,stroke,'stroke-width':1.5},s);el('text',{x:x+12,y:y+22,'font-size':13,'font-weight':600,style:'fill:var(--ink)'},s,title);(lines||[]).forEach((l,i)=>el('text',{x:x+12,y:y+40+i*15,'font-size':11},s,l));};
+  const arrow=(x1,y1,x2,y2,color,label,dash,ly)=>{el('line',{x1,y1,x2,y2,stroke:color,'stroke-width':2,'stroke-dasharray':dash||'','marker-end':'url(#ah'+color.replace(/[^a-z0-9]/gi,'')+')'},s);if(label)el('text',{x:(x1+x2)/2,y:(ly!=null?ly:(y1+y2)/2-6),'text-anchor':'middle','font-size':11,style:'fill:'+color},s,label);};
+  const defs=el('defs',{},s);
+  [css('--ink'),css('--router'),css('--prefill'),css('--decode')].forEach(c=>{const m=el('marker',{id:'ah'+c.replace(/[^a-z0-9]/gi,''),viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);el('path',{d:'M0,0 L10,5 L0,10 z',fill:c},m);});
+  box(10,120,110,70,css('--surface'),css('--line'),'Client',['chat, docs,','long context']);
+  box(160,20,300,290,css('--router-soft'),css('--router'),'Router (llm-d EPP + Envoy)',[]);
+  const steps=['1  filters: prefill / decode role','2  scorers: prefix cache, queue','3  pick decode pod (Gaudi 3)','4  hetero-pd-decider:','     U, R_P, R_D, link, load, SLO','     → split or local','5  pick best prefill pod (A30)'];
+  steps.forEach((t,i)=>el('text',{x:178,y:62+i*20,'font-size':12,style:i>=3&&i<=5?'fill:var(--router);font-weight:600':'fill:var(--ink)'},s,t));
+  el('text',{x:178,y:222,'font-size':11},s,'polls each pod’s /metrics every second:');
+  el('text',{x:178,y:238,'font-size':11},s,'running, waiting, KV-cache use');
+  el('text',{x:178,y:262,'font-size':11},s,'metric: llm_d_epp_hetero_pd_decision_total');
+  el('text',{x:178,y:278,'font-size':11},s,'{reason, remote_prefill}');
+  box(560,20,190,100,css('--prefill-soft'),css('--prefill'),'Prefill: NVIDIA A30',['vLLM v0.26.0, NIXL','reads the prompt,','builds the KV cache']);
+  box(560,200,190,110,css('--decode-soft'),css('--decode'),'Decode: Intel Gaudi 3',['routing sidecar :8000','vLLM-gaudi :8200, NIXL','streams the answer']);
+  arrow(120,155,158,155,css('--ink'),'request',null,147);
+  arrow(462,240,558,240,css('--router'),'every request',null,232);
+  arrow(655,198,655,123,css('--decode'),'','4 3',null);
+  el('text',{x:646,y:165,'text-anchor':'end','font-size':11,style:'fill:var(--decode)'},s,'split: "prefill this"');
+  el('text',{x:668,y:165,'font-size':11,style:'fill:var(--prefill)'},s,'');
+  arrow(700,123,700,198,css('--prefill'),'',null);
+  el('text',{x:760,y:150,'font-size':12,'font-weight':600,style:'fill:var(--prefill)'},s,'KV cache via NIXL');
+  el('text',{x:760,y:166,'font-size':11},s,'U × '+fmtN(KV_BYTES)+' bytes');
+  el('text',{x:760,y:182,'font-size':11},s,'over the node network');
+  el('text',{x:760,y:250,'font-size':12,'font-weight':600,style:'fill:var(--decode)'},s,'Local path:');
+  el('text',{x:760,y:266,'font-size':11},s,'Gaudi prefills itself;');
+  el('text',{x:760,y:282,'font-size':11},s,'its running streams pause');
+  el('path',{d:'M 600 312 L 600 330 L 65 330 L 65 194',fill:'none',stroke:css('--ink'),'stroke-width':1.5,'stroke-dasharray':'2 3','marker-end':'url(#ah'+css('--ink').replace(/[^a-z0-9]/gi,'')+')'},s);
+  el('text',{x:330,y:346,'text-anchor':'middle','font-size':11},s,'tokens stream back to the client');
+}
+
+// ---------- results ----------
+let R=null;
+fetch('results.json',{cache:'no-store'}).then(r=>r.json()).then(j=>{R=j;drawResults();drawParams();}).catch(()=>{$('stamp').textContent='results: not available';});
+function chip(status,text){const c=document.createElement('span');c.className='chip s-'+status;c.textContent=text||status;return c;}
+function row(tb,cells){const tr=document.createElement('tr');cells.forEach(x=>{const td=document.createElement('td');if(x instanceof Node)td.appendChild(x);else td.textContent=x;tr.appendChild(td);});tb.appendChild(tr);return tr;}
+function drawResults(){
+  if(!R)return;
+  const d=new Date(R.updated);
+  $('stamp').textContent='results updated '+d.toLocaleString('en',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+' · '+R.model;
+  const done=R.milestones.filter(m=>m.status==='done').length;
+  $('resSummary').textContent=`${done} of ${R.milestones.length} steps done on ${R.cluster}. The router and decider run end to end and KV moves between cards. The cross-vendor gate waits on the Gaudi node.`;
+  const mt=$('milestones').tBodies[0];mt.replaceChildren();R.milestones.forEach(m=>row(mt,[m.step,chip(m.status)]));
+  const ht=$('hw').tBodies[0];ht.replaceChildren();R.hardware.forEach(h=>{const tr=row(ht,[h.device+' · '+h.node,h.role,chip(h.status)]);tr.title=h.note;const td=document.createElement('td');});
+  R.hardware.forEach((h,i)=>{const tr=ht.rows[i];const n=document.createElement('div');n.className='small muted';n.textContent=h.note;tr.cells[0].appendChild(n);});
+  const ct=$('corr').tBodies[0];ct.replaceChildren();R.correctness.forEach(c=>{const pct=c.compared?Math.round(100*c.identical/c.compared)+'% ('+c.identical+'/'+c.compared+')':'—';const tr=row(ct,[c.layout,pct,chip(c.status)]);const n=document.createElement('div');n.className='small muted';n.textContent=c.note;tr.cells[0].appendChild(n);});
+  const at=$('ab').tBodies[0];at.replaceChildren();$('abEmpty').hidden=R.ab.length>0;
+  R.ab.forEach(a=>{const ch=(a.hetero-a.stock)/a.stock;const better=a.lowerIsBetter?ch<0:ch>0;const s=document.createElement('span');s.className=better?'s-ok':'s-down';s.textContent=(ch>0?'+':'')+(ch*100).toFixed(1)+'%';row(at,[a.metric,a.stockFmt||String(a.stock),a.heteroFmt||String(a.hetero),s]);});
+  drawDecisions();
+}
+function drawDecisions(){
+  const svg=$('dec');svg.replaceChildren();const has=R&&R.decisions.length>0;$('decEmpty').hidden=has;svg.style.display=has?'':'none';if(!has)return;
+  const max=Math.max(...R.decisions.map(d=>d.count));const L=150,W=440;
+  R.decisions.forEach((d,i)=>{const y=10+i*26;el('text',{x:L-8,y:y+14,'text-anchor':'end'},svg,d.reason);el('rect',{x:L,y,width:Math.max(2,W*d.count/max),height:18,rx:4,fill:d.remote?css('--prefill'):css('--decode')},svg);el('text',{x:L+W*d.count/max+6,y:y+14,style:'fill:var(--ink)'},svg,fmtN(d.count));});
+}
+function drawParams(){
+  const tb=$('params').tBodies[0];tb.replaceChildren();
+  const meas=R&&R.profiles&&R.profiles.measured;
+  const P=[['kvBytesPerToken',fmtN(KV_BYTES),'KV size of one token, Qwen2.5-7B bf16'],['ttftSLOMs','1000','keep local if remote would exceed this'],['stallWeight (w)','0.25','cost of one stream-second of freeze vs. one second of new TTFT'],['safetyMargin','0.1','remote must win by 10%'],['maxDecodeKVUsage','0.9','no transfers into a decode pod over 90% KV'],['minUncachedTokens','256','shorter prompts never split'],['avgQueuedPromptTokens','1024','work assumed per waiting request'],['bandwidthGbps',String(R?R.profiles.bandwidthGbps:10)+(meas?'':' *'),'A30 → Gaudi link'],['nvidia-a30 prefill',fmtN(R?R.profiles['nvidia-a30']:5000)+' tok/s'+(meas?'':' *'),'measured profile'],['intel-gaudi3 prefill',fmtN(R?R.profiles['intel-gaudi3']:20000)+' tok/s'+(meas?'':' *'),'measured profile']];
+  P.forEach(p=>{const c=document.createElement('code');c.textContent=p[0];const tr=row(tb,[c,p[1],p[2]]);tr.cells[1].className='mono num';});
+  $('paramNote').hidden=!!meas;
+}
+
+// ---------- value model ----------
+function computeValue(){
+  const s=state(), num=id=>Math.max(0,Number($(id).value)||0);
+  const classes=[[num('vShortR'),num('vShortU')],[num('vMidR'),num('vMidU')],[num('vLongR'),num('vLongU')]];
+  const N=Math.max(1,num('vN')),tps=Math.max(1,num('vTps')),nD=Math.max(1,num('vND')),nP=num('vNP'),pD=num('vPD'),pP=num('vPP');
+  const rD=s.cfg.rates['intel-gaudi3'],rP=s.cfg.rates['nvidia-a30'],slo=s.cfg.slo/1000;
+  const pols=[['hetero-pd-decider',(d,U)=>isSplit(d)],['Stock prefix-based',(d,U)=>U>=s.v.st&&s.v.st>0],['Always split',(d,U)=>U>0],['Never split',()=>false]];
+  const fleetCost=nD*pD+nP*pP;
+  const res=pols.map(([name,f])=>{let decSec=0,preSec=0,freeze=0,miss=0,n=0;
+    classes.forEach(([rate,U])=>{if(!rate||!U)return;const d=decide(s.cfg,U,Object.assign({},s.dec,{running:N}),s.pre);
+      const local=d.local!=null?d.local:U/rD, remote=d.remote!=null?d.remote:U/rP+U*s.cfg.kvBytes/(s.cfg.bw*1e9/8);
+      const split=f(d,U)&&nP>0;
+      if(split){preSec+=rate*U/rP;if(slo>0&&remote>slo)miss+=rate;}else{decSec+=rate*U/rD;freeze+=rate*N*U/rD;if(slo>0&&local>slo)miss+=rate;}n+=rate;});
+    const busy=nP>0?preSec*nD/nP/3600:0;
+    const tokens=Math.max(0,3600-decSec)*N*tps;
+    const perM=tokens>0?fleetCost/(nD*tokens)*1e6:Infinity;
+    return {name,decSec,preSec,freeze,miss:n?miss/n:0,busy,tokens,perM};});
+  return {res,nD,nP,fleetCost};
+}
+function drawValue(){
+  const {res,nD,nP}=computeValue();
+  const tb=$('vTable').tBodies[0];tb.replaceChildren();
+  const pct=x=>(x*100).toFixed(x<0.1&&x>0?1:0)+'%';
+  res.forEach(r=>{const tr=row(tb,[r.name,fmtN(Math.round(r.decSec))+' s',(r.tokens/1e6).toFixed(2)+'M',pct(r.busy),fmtN(Math.round(r.freeze))+' s',pct(r.miss),'$'+r.perM.toFixed(3)]);for(let i=1;i<7;i++)tr.cells[i].className='mono num';
+    if(r.busy>1)tr.cells[3].style.color='var(--bad)';if(r.miss>0)tr.cells[5].style.color='var(--warn)';});
+  const h=res[0],st=res[1],nv=res[3];
+  const yearTok=h.tokens*nD*24*365;
+  const saved=(st.perM-h.perM)/1e6*yearTok;
+  const fz=st.freeze>0?(st.freeze-h.freeze)/st.freeze:0;
+  const sign=x=>x>=0?'+':'−';
+  const tiles=[
+    ['Hetero vs stock, per year',sign(saved)+'$'+fmtN(Math.round(Math.abs(saved))),`same ${nD}+${nP} card fleet; ${h.perM<st.perM?'more':'less'} output per dollar`],
+    ['Chat freezes vs stock',fz>=0?pct(fz)+' fewer':pct(-fz)+' more',fmtN(Math.round(Math.abs(st.freeze-h.freeze)))+' stream-seconds per card-hour'],
+    ['Requests over the TTFT target',pct(h.miss),'stock '+pct(st.miss)+' · always split '+pct(res[2].miss)]
+  ];
+  const tw=$('vTiles');tw.replaceChildren();
+  tiles.forEach(([a,b,c])=>{const p=document.createElement('div');p.className='panel';const x=document.createElement('div');x.className='small muted';x.textContent=a;const y=document.createElement('div');y.className='bignum num';y.textContent=b;const z=document.createElement('div');z.className='small muted';z.textContent=c;p.append(x,y,z);tw.appendChild(p);});
+}
+['vShortR','vShortU','vMidR','vMidU','vLongR','vLongU','vN','vTps','vND','vNP','vPD','vPP'].forEach(i=>$(i).addEventListener('input',()=>{drawValue();drawOverview();}));
+
+
+// ---------- live (served from the cluster) ----------
+let LIVE=null, liveOk=false, liveTimer=null;
+const LCOL=()=>({'remote-better':css('--prefill'),'local-better':css('--decode'),'short-prompt':css('--muted'),'remote-misses-slo':css('--bad'),'decode-kv-full':css('--warn'),'no-prefill-candidate':css('--router'),'missing-profile':css('--ink'),'decode-disabled':css('--line')});
+function pollLive(){
+  fetch('live.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw 0;return r.json();}).then(j=>{LIVE=j;liveOk=true;$('liveOff').hidden=true;$('liveOn').hidden=false;if(!$('live').hidden)drawLive();})
+  .catch(()=>{liveOk=false;$('liveOff').hidden=false;$('liveOn').hidden=true;});
+}
+pollLive();liveTimer=setInterval(pollLive,2000);
+function deltas(h,span){ // h: history, span seconds -> [first,last]
+  if(h.length<2)return null;const last=h[h.length-1];let i=h.length-1;while(i>0&&last.t-h[i-1].t<=span)i--;return [h[i],last];}
+function drawLive(){
+  if(!LIVE)return;const h=LIVE.history;if(!h.length)return;
+  const last=h[h.length-1];const errs=Object.keys(LIVE.errors||{});
+  const st=$('lvStatus');st.textContent=errs.length?errs.length+' scrape issue'+(errs.length>1?'s':''):'live';st.className='chip '+(errs.length?'s-running':'s-ok');
+  st.title=errs.map(k=>k+': '+LIVE.errors[k]).join('\n');
+  const pods=LIVE.pods||{};const names=Object.keys(pods).sort();
+  $('lvLine').textContent=`${names.length} model-server pod${names.length===1?'':'s'}: ${names.map(n=>pods[n].role+' '+pods[n].cls).join(', ')}. Updated ${new Date(last.t*1000).toLocaleTimeString()}, every ${LIVE.interval}s.`;
+  // decisions
+  const sumDec=(s,f)=>Object.entries((s.epp&&s.epp.hetero)||{}).reduce((a,[k,v])=>a+(f(k)?v:0),0);
+  const w60=deltas(h,60);
+  const dSplit=w60?sumDec(w60[1],k=>k.endsWith('|true'))-sumDec(w60[0],k=>k.endsWith('|true')):0;
+  const dAll=w60?sumDec(w60[1],()=>true)-sumDec(w60[0],()=>true):0;
+  const dsec=w60?Math.max(1,w60[1].t-w60[0].t):60;
+  const decPods=names.filter(n=>pods[n].role==='decode');
+  const podRate=(n,key,win)=>{if(!win||!win[0].pods[n]||!win[1].pods[n])return 0;return (win[1].pods[n][key]-win[0].pods[n][key])/Math.max(1,win[1].t-win[0].t);};
+  const w30=deltas(h,30);
+  const kvIn=decPods.reduce((a,n)=>a+podRate(n,'ext_hits',w30),0);
+  const outTok=names.reduce((a,n)=>a+podRate(n,'gen_tokens',w30),0);
+  const tiles=[['Decisions, last minute',fmtN(Math.round(dAll*60/dsec)),'per minute'],['Split to the A30',dAll?Math.round(100*dSplit/dAll)+'%':'—',fmtN(Math.round(dSplit))+' of '+fmtN(Math.round(dAll))+' in the last minute'],['KV arriving at decode',fmtN(Math.round(kvIn))+' tok/s','prefix-cache hits from transfers'],['Output tokens',fmtN(Math.round(outTok))+' tok/s','all model servers']];
+  const tw=$('lvTiles');tw.replaceChildren();tiles.forEach(([a,b,c])=>{const p=document.createElement('div');p.className='panel';const x=document.createElement('div');x.className='small muted';x.textContent=a;const y=document.createElement('div');y.className='bignum num';y.textContent=b;const z=document.createElement('div');z.className='small muted';z.textContent=c;p.append(x,y,z);tw.appendChild(p);});
+  // pods table
+  const tb=$('lvPods').tBodies[0];tb.replaceChildren();
+  names.forEach(n=>{const p=pods[n],c=last.pods[n]||{};const avg=(a,b)=>{if(!w30||!w30[0].pods[n]||!c)return '—';const ds=c[a]-w30[0].pods[n][a],dn=c[b]-w30[0].pods[n][b];return dn>0?fmtS(ds/dn):'—';};
+    const tr=row(tb,[n,p.role+' · '+p.cls,String(Math.round(c.running||0)),String(Math.round(c.waiting||0)),Math.round(100*(c.kv||0))+'%',fmtN(Math.round(podRate(n,'prompt_tokens',w30))),fmtN(Math.round(podRate(n,'gen_tokens',w30))),p.role==='decode'?fmtN(Math.round(podRate(n,'ext_hits',w30))):'—',avg('ttft_sum','ttft_n'),avg('itl_sum','itl_n')]);
+    for(let i=2;i<10;i++)tr.cells[i].className='mono num';});
+  // reasons cumulative
+  const rb=$('lvReasons').tBodies[0];rb.replaceChildren();const hd=(last.epp&&last.epp.hetero)||{};const tot=Object.values(hd).reduce((a,b)=>a+b,0);
+  Object.entries(hd).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>{const [reason,remote]=k.split('|');const tr=row(rb,[reason,remote==='true'?'split':'local',fmtN(Math.round(v)),tot?Math.round(100*v/tot)+'%':'—']);tr.cells[2].className='mono num';tr.cells[3].className='mono num';});
+  if(!tot)row(rb,['No hetero-pd decisions yet. The router may be running the stock or always-split config.','','','']);
+  const sd=(last.epp&&last.epp.disagg)||{};$('lvStock').textContent=Object.keys(sd).length?'All deciders (llm_d_epp_disagg_decision_total): '+Object.entries(sd).map(([k,v])=>k.replace('|',' → ')+' '+fmtN(Math.round(v))).join(' · '):'';
+  drawLiveDec(h);drawLiveRun(h,names);
+}
+function drawLiveDec(h){
+  const svg=$('lvDec');svg.replaceChildren();const L=34,T=10,W=516,H=180;const t1=h[h.length-1].t,t0=t1-900,bucket=10,nb=90;
+  const cols=LCOL();const bins=[];const reasons=new Set();
+  for(let b=0;b<nb;b++)bins.push({});
+  for(let i=1;i<h.length;i++){const a=h[i-1],c=h[i];if(c.t<t0)continue;const bi=Math.min(nb-1,Math.floor((c.t-t0)/bucket));const ha=(a.epp&&a.epp.hetero)||{},hc=(c.epp&&c.epp.hetero)||{};
+    for(const k in hc){const d=hc[k]-(ha[k]||0);if(d>0){const r=k.split('|')[0];reasons.add(r);bins[bi][r]=(bins[bi][r]||0)+d;}}}
+  const order=[...reasons].sort();const max=Math.max(1,...bins.map(b=>Object.values(b).reduce((x,y)=>x+y,0)));
+  [0,.5,1].forEach(f=>{const y=T+H-H*f;el('line',{x1:L,x2:L+W,y1:y,y2:y,stroke:css('--grid')},svg);el('text',{x:L-6,y:y+4,'text-anchor':'end'},svg,String(Math.round(max*f)));});
+  const bw=W/nb;bins.forEach((b,i)=>{let y=T+H;order.forEach(r=>{const v=b[r]||0;if(!v)return;const hgt=H*v/max;y-=hgt;el('rect',{x:L+i*bw+.5,y,width:Math.max(1,bw-1),height:hgt,fill:cols[r]||css('--muted')},svg);});});
+  ['−15 min','−10','−5','now'].forEach((t,i)=>el('text',{x:L+W*i/3,y:T+H+16,'text-anchor':i===0?'start':i===3?'end':'middle'},svg,t));
+  const lg=$('lvDecLegend');lg.replaceChildren();order.forEach(r=>{const s=document.createElement('span');const i=document.createElement('i');i.style.background=cols[r]||css('--muted');s.append(i,document.createTextNode(r));lg.appendChild(s);});
+  if(!order.length){el('text',{x:L+W/2,y:T+H/2,'text-anchor':'middle'},svg,'No decisions in the last 15 minutes');}
+}
+function drawLiveRun(h,names){
+  const svg=$('lvRun');svg.replaceChildren();const L=34,T=10,W=516,H=180;const t1=h[h.length-1].t,t0=t1-900;
+  const pal=[css('--decode'),css('--prefill'),css('--router'),css('--warn'),css('--bad')];
+  let max=1;h.forEach(s=>names.forEach(n=>{if(s.pods[n])max=Math.max(max,s.pods[n].running);}));
+  [0,.5,1].forEach(f=>{const y=T+H-H*f;el('line',{x1:L,x2:L+W,y1:y,y2:y,stroke:css('--grid')},svg);el('text',{x:L-6,y:y+4,'text-anchor':'end'},svg,String(Math.round(max*f)));});
+  const lg=$('lvRunLegend');lg.replaceChildren();
+  names.forEach((n,k)=>{const pts=h.filter(s=>s.t>=t0&&s.pods[n]).map(s=>[L+W*(s.t-t0)/900,T+H-H*s.pods[n].running/max]);if(pts.length>1)el('polyline',{points:pts.map(p=>p.join(',')).join(' '),fill:'none',stroke:pal[k%pal.length],'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'},svg);
+    const s=document.createElement('span');const i=document.createElement('i');i.style.background=pal[k%pal.length];s.append(i,document.createTextNode(n));lg.appendChild(s);});
+  ['−15 min','−10','−5','now'].forEach((t,i)=>el('text',{x:L+W*i/3,y:T+H+16,'text-anchor':i===0?'start':i===3?'end':'middle'},svg,t));
+}
+function drawFlow(){
+  const st=state(),U=Math.max(0,st.v.u-st.v.c),d=decide(st.cfg,U,st.dec,st.pre);
+  const order=['short','disabled','kvfull','profile','nocand','calc','slo','compare','local'];
+  const stop={'short-prompt':'short','decode-disabled':'disabled','decode-kv-full':'kvfull','missing-profile':'profile','no-prefill-candidate':'nocand','remote-misses-slo':'slo','remote-better':'compare','local-better':'local'}[d.reason];
+  const k=order.indexOf(stop);
+  document.querySelectorAll('#flow .fstep').forEach(e=>{const i=order.indexOf(e.dataset.step);e.classList.toggle('hit',i===k);e.classList.toggle('on',i<k);e.classList.toggle('dim',i>k);});
+  const t=$('flowNow');
+  t.textContent=`Simulator request: ${fmtN(U)} new tokens, ${st.v.nr} streams running on the decode card. `+(d.remote!=null?`Remote ${fmtS(d.remote)}, local ${fmtS(d.local)}, stall ${fmtS(d.stall)}. `:'')+`Result: ${isSplit(d)?'split':'keep on decode card'} (${d.reason}).`;
+}
+function drawOverview(){
+  const {res,nD,nP}=computeValue();const h=res[0],st=res[1],nv=res[3];
+  const up=st.tokens>0?(h.tokens/st.tokens-1):0, upNever=nv.tokens>0?(h.tokens/nv.tokens-1):0;
+  $('ovOut').textContent=(up>=0?'+':'')+(up*100).toFixed(1)+'%';
+  $('ovOutD').textContent=`vs. stock llm-d today, and ${(upNever>=0?'+':'')}${(upNever*100).toFixed(0)}% vs. no splitting at all.`;
+  const fz=st.freeze>0?(st.freeze-h.freeze)/st.freeze:0;
+  $('ovFreeze').textContent=Math.round(fz*100)+'%';
+  $('ovFreezeD').textContent=`vs. stock llm-d: ${fmtN(Math.round(st.freeze))} → ${fmtN(Math.round(h.freeze))} user-seconds of freezing per card-hour.`;
+  const yearTok=h.tokens*nD*24*365, saved=(st.perM-h.perM)/1e6*yearTok;
+  $('ovDollars').textContent=(saved>=0?'$':'−$')+fmtN(Math.round(Math.abs(saved)/100)*100);
+  $('ovDollarsD').textContent=`on a fleet of ${nD} Gaudi + ${nP} NVIDIA cards, valued at today's cost per answer. Scales with fleet size.`;
+  $('ovBasis').textContent=`Modeled from the router's own decision rules on the lab's test traffic (32 chat users plus long documents). Card speeds are estimates and card prices are examples until the head-to-head test measures them. Adjust the assumptions in the Value calculator tab.`;
+  const pr=$('ovProof');pr.replaceChildren();
+  const items=[['done','Built and tested','The router plugin compiles into llm-d and passes all 33 automated tests.'],
+    ['done','Runs on OpenShift','Installed on the lab cluster with NVIDIA and Intel operators; requests flow end to end.'],
+    ['done','Prompts move between cards','Working memory for 137,000+ prompt tokens moved card to card in 2 to 5 ms per handoff.'],
+    ['review','Answers identical either way','Answers are correct both ways; about a third differ in wording after the first sentence. A follow-up test is pinning down why.'],
+    ['blocked','NVIDIA + Intel together','Waiting on the Gaudi server repair.'],
+    ['pending','Savings measured','Head-to-head against stock llm-d, after the repair.']];
+  const lbl={done:'Done',review:'In review',blocked:'Blocked',pending:'Next'};
+  items.forEach(([st,a,b])=>{const li=document.createElement('li');li.appendChild(chip(st,lbl[st]));const d=document.createElement('div');const t=document.createElement('b');t.textContent=a;const x=document.createElement('span');x.className='x';x.textContent=b;d.append(t,x);li.appendChild(d);pr.appendChild(li);});
+}
+function redraw(){drawArch();drawSim();drawValue();drawResults();drawLive();drawFlow();drawOverview();}
+const start=location.hash.slice(1);
+if(start&&tabs.some(t=>t.getAttribute('aria-controls')===start))show(start);else redraw();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',redraw);
+new MutationObserver(redraw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+})();
+</script>

@@ -27,7 +27,13 @@ plugins:
     minUncachedTokens: 256
     bandwidthGbps: 25
     avgQueuedPromptTokens: 1024
+    handoffOverheadMs: 300         # measure: remote-path TTFT minus local TTFT, short prompts
+    stallFraction: 0.1             # chunked prefill: running streams lose ~10% of a local prefill
     fallbackNonCachedTokens: 1024
+    strategy: auto                 # auto | model | guarded-stock
+    overrideMargin: 0.25           # auto overrules stock only when the other path is 25% cheaper
+    stockNonCachedTokens: 1024
+    idleRunningRequests: 2
     profiles:
       nvidia-a30:
         prefillTokensPerSec: 5000

@@ -1,0 +1,1025 @@
+<meta charset="utf-8">
+<title>Hetero-PD Decider Lab</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: four working tabs. Teal = the reading card (NVIDIA A30), amber = the answering card (Gaudi). */
+:root{
+  --bg:#f5f6f4; --surface:#ffffff; --ink:#1b2321; --muted:#5d6966; --line:#d9dedb; --grid:#e9edeb;
+  --nv:#0f7c74; --nv-soft:#d8eeeb; --gd:#b8640c; --gd-soft:#f7e8d6;
+  --accent:#4b4fb0; --accent-soft:#e6e7f7; --ok:#2f7d3a; --warn:#9a6400; --bad:#b3261e;
+  --f-display:"Schibsted Grotesk","Helvetica Neue",Arial,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#121615; --surface:#1a201e; --ink:#e6ebe9; --muted:#9aa6a2; --line:#2e3734; --grid:#242c29;
+  --nv:#4cc2b6; --nv-soft:#173a37; --gd:#f0a04b; --gd-soft:#3d2a14; --accent:#9da1f2; --accent-soft:#262844; --ok:#6cc47a; --warn:#e2b04a; --bad:#f2827a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121615; --surface:#1a201e; --ink:#e6ebe9; --muted:#9aa6a2; --line:#2e3734; --grid:#242c29;
+  --nv:#4cc2b6; --nv-soft:#173a37; --gd:#f0a04b; --gd-soft:#3d2a14; --accent:#9da1f2; --accent-soft:#262844; --ok:#6cc47a; --warn:#e2b04a; --bad:#f2827a; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.55}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.wrap{max-width:1120px;margin-inline:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:22px 56px}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(1.6rem,3.4vw,2.2rem);margin:0}
+.sub{color:var(--muted);margin:2px 0 14px}
+nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);display:flex;gap:4px;overflow-x:auto;border-bottom:1px solid var(--line);margin-bottom:22px}
+nav button{font:500 1rem var(--f-body);color:var(--muted);background:none;border:0;border-bottom:3px solid transparent;padding:10px 14px;cursor:pointer;white-space:nowrap}
+nav button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h2{font-family:var(--f-display);font-weight:700;font-size:1.35rem;margin:0 0 8px;text-wrap:balance}
+h3{font-family:var(--f-display);font-weight:700;font-size:1.05rem;margin:0 0 6px}
+p{margin:0 0 10px;max-width:68ch}
+.muted{color:var(--muted)} .small{font-size:.88rem}
+.num{font-variant-numeric:tabular-nums}
+section[hidden]{display:none}
+/* ---- live hardware panel (Stack tab) ---- */
+.hwhead{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline}
+.hwgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:16px}
+.mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}
+@media (max-width:560px){.mini{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.mini div{border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0}
+.mini b{display:block;font-family:var(--f-display);font-size:1.45rem;line-height:1.1;font-variant-numeric:tabular-nums}
+.mini span{font-size:.78rem;color:var(--muted)}
+.hwsec{font:600 .74rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:14px 0 4px}
+.hbar{height:6px;background:var(--grid);border-radius:3px;position:relative;min-width:70px}
+.hbar>i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--ok)}
+.hbar>i.w{background:var(--warn)} .hbar>i.b{background:var(--bad)}
+.issues{margin:8px 0 0;padding-left:1.1rem;display:flex;flex-direction:column;gap:3px;font-size:.92rem}
+.hwgrid td,.hwgrid th{padding:5px 6px}
+details.hw{margin-top:8px;font-size:.86rem} details.hw summary{cursor:pointer;color:var(--muted)}
+details.hw pre{white-space:pre-wrap;font:.76rem/1.4 var(--f-mono);background:var(--bg);padding:8px;border-radius:6px;max-height:16rem;overflow:auto}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px}
+.chart{position:relative} .chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart .tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:.78rem;box-shadow:0 2px 8px rgb(0 0 0/.12);white-space:nowrap}
+.lgd{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.8rem;color:var(--muted);margin:2px 0 6px}
+.lgd i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+
+.stack{display:flex;flex-direction:column;gap:16px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px;min-width:0}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,19rem),1fr));gap:16px}
+.three{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:12px}
+.tag{display:inline-block;font:600 .72rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px;vertical-align:middle}
+.pill{display:inline-flex;align-items:center;gap:6px;font:600 .78rem var(--f-body);padding:3px 10px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok)} .p-stop{color:var(--gd)} .p-move{color:var(--nv)} .p-warn{color:var(--warn)} .p-bad{color:var(--bad)} .p-idle{color:var(--muted)}
+/* stages */
+.calc{display:grid;grid-template-columns:minmax(0,330px) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:860px){.calc{grid-template-columns:1fr}}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.presets button,.btn{font:500 .88rem var(--f-body);border:1.5px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:6px 12px;cursor:pointer}
+.presets button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent);color:var(--surface)}
+fieldset{border:0;border-top:1px solid var(--line);margin:10px 0 0;padding:10px 0 0}
+legend{font:600 .74rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding-right:6px}
+.in{display:grid;grid-template-columns:minmax(0,1fr) 7.5rem;gap:8px;align-items:center;margin:6px 0}
+.in label{font-size:.88rem} .in label var{font-family:var(--f-mono);font-style:normal;color:var(--accent);font-size:.82rem}
+.in input[type=number]{font:inherit;font-family:var(--f-mono);font-size:.88rem;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);width:100%;box-sizing:border-box}
+.chk{display:flex;gap:8px;align-items:center;font-size:.88rem;margin:6px 0}
+.stage{border:1.5px solid var(--line);border-radius:12px;background:var(--surface);padding:14px 16px}
+.stage.go{border-color:var(--ok)} .stage.stopped{border-color:var(--gd);box-shadow:0 0 0 2px var(--gd-soft)} .stage.skip{opacity:.4}
+.stage.moved{border-color:var(--nv);box-shadow:0 0 0 2px var(--nv-soft)}
+.sh{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px}
+.sh b{font-family:var(--f-display);font-size:1.05rem}
+.sh .k{font:600 .72rem var(--f-body);text-transform:uppercase;letter-spacing:.05em;color:var(--muted);display:block}
+.math{font-family:var(--f-mono);font-size:.84rem;line-height:1.75;overflow-x:auto;white-space:pre;background:var(--bg);border-radius:8px;padding:8px 10px;margin:6px 0 0}
+.math .v{color:var(--accent)} .math .r{font-weight:500;color:var(--ink)}
+.down{width:2px;height:16px;background:var(--line);margin:0 0 0 28px}
+.result{border-radius:12px;padding:14px 16px;font-family:var(--f-display);font-weight:700;font-size:1.3rem;border:2px solid}
+.result.move{background:var(--nv-soft);border-color:var(--nv);color:var(--nv)}
+.result.keep{background:var(--gd-soft);border-color:var(--gd);color:var(--gd)}
+.result small{display:block;font:400 .9rem var(--f-body);color:var(--ink);margin-top:2px}
+.stock{font-size:.9rem;margin-top:10px;padding:10px 12px;border:1px dashed var(--line);border-radius:8px}
+/* value */
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:18px}
+.kpi .v{font-family:var(--f-display);font-weight:700;font-size:2.3rem;line-height:1.05;color:var(--nv)}
+.kpi .l{font-weight:600;margin:6px 0 2px} .kpi .d{font-size:.86rem;color:var(--muted)}
+.slider{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;margin-bottom:16px}
+.slider label{font-weight:600}
+.slider output{font-family:var(--f-display);font-weight:700;font-size:1.05rem}
+.slider input{grid-column:1/-1;width:100%;accent-color:var(--accent)}
+.slider .hint{grid-column:1/-1;font-size:.84rem;color:var(--muted)}
+details{margin-top:8px} summary{cursor:pointer;color:var(--muted);font-size:.9rem}
+.assume{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:10px;margin-top:10px}
+.assume label{display:flex;flex-direction:column;gap:3px;font-size:.84rem;color:var(--muted)}
+.assume input{font:inherit;font-size:.92rem;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
+/* traffic + mode */
+.offline{border-left:4px solid var(--warn)}
+.modebar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+.modebar b{font-family:var(--f-display);font-size:1.15rem}
+.primary{font:600 1rem var(--f-body);border:0;border-radius:999px;padding:10px 20px;cursor:pointer;background:var(--accent);color:var(--surface)}
+.primary[disabled],.btn[disabled]{opacity:.45;cursor:not-allowed}
+.danger{font:600 1rem var(--f-body);border:1.5px solid var(--bad);color:var(--bad);background:var(--surface);border-radius:999px;padding:9px 18px;cursor:pointer}
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:4px}
+.prog{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:10px 0 4px}
+.prog div{height:100%;background:var(--accent)}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.tile .v{font-family:var(--f-display);font-weight:700;font-size:1.7rem;line-height:1.1}
+.tile .l{font-size:.86rem;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:12px}
+.split{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--grid);margin-top:8px}
+.split .m{background:var(--nv)} .split .k{background:var(--gd)}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th{text-align:left;font-weight:600;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--line);padding:6px 8px;white-space:nowrap}
+td{border-bottom:1px solid var(--grid);padding:8px;font-variant-numeric:tabular-nums}
+.tablebox{overflow-x:auto}
+.choice{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,20rem),1fr));gap:14px}
+.opt{border:2px solid var(--line);border-radius:12px;padding:16px;background:var(--surface);display:flex;flex-direction:column;gap:8px}
+.opt.current{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.opt h3{font-size:1.15rem;margin:0}
+.opt ul{margin:0;padding-left:1.1rem;font-size:.9rem}
+.err{color:var(--bad);font-size:.9rem;min-height:1.2em}
+.win{display:flex;flex-direction:column;gap:2px;min-width:13rem} .win b{font-family:var(--f-display)} .w-plugin{color:var(--nv)} .w-stock{color:var(--gd)} .w-tie{color:var(--muted)}
+.summary{border:1.5px solid var(--line);border-radius:12px;padding:14px 16px;margin:6px 0 14px;background:var(--bg)}
+.sumhead{font-family:var(--f-display);font-weight:700;font-size:1.35rem;margin:0 0 4px}
+.sumlist{margin:0;padding-left:1.1rem;font-size:.92rem;display:flex;flex-direction:column;gap:4px}
+.ok-t{color:var(--ok);font-weight:600} .bad-t{color:var(--bad);font-weight:600} .same-t{color:var(--muted)}
+select.btn{padding:5px 10px}
+
+/* ---- the stack (CSS 3D) ---- */
+.scene{position:relative;height:560px;overflow:hidden;border-radius:12px;background:radial-gradient(ellipse at 50% 30%,var(--surface),var(--bg) 70%);border:1px solid var(--line);cursor:grab;touch-action:none;user-select:none}
+.scene:active{cursor:grabbing}
+.stage3d{position:absolute;left:50%;top:58%;width:0;height:0;perspective:1600px}
+.world{position:absolute;transform-style:preserve-3d;transition:transform .08s linear}
+.box{position:absolute;transform-style:preserve-3d}
+.face{position:absolute;box-sizing:border-box;border:1px solid var(--fb,var(--line));background:var(--ff,var(--surface));display:flex;flex-direction:column;justify-content:center;padding:6px 10px;overflow:hidden;backface-visibility:hidden;font-size:12px;line-height:1.3;color:var(--ink)}
+.face b{font-family:var(--f-display);font-size:13px}
+.face .s{color:var(--muted);font-size:11px}
+.face.big b{font-size:15px}
+.srv{--ff:color-mix(in srgb,var(--ink) 8%,var(--surface));--fb:color-mix(in srgb,var(--ink) 35%,transparent)}
+.srv .top{--ff:color-mix(in srgb,var(--ink) 4%,transparent)}
+.card-nv{--ff:color-mix(in srgb,var(--nv) 28%,var(--surface));--fb:var(--nv)}
+.card-gd{--ff:color-mix(in srgb,var(--gd) 28%,var(--surface));--fb:var(--gd)}
+.card-down{--ff:color-mix(in srgb,var(--bad) 22%,var(--surface));--fb:var(--bad)}
+.layer-drv{--ff:color-mix(in srgb,var(--muted) 16%,var(--surface));--fb:var(--muted)}
+.layer-rt{--ff:color-mix(in srgb,var(--accent) 20%,var(--surface));--fb:var(--accent)}
+.layer-model{--ff:color-mix(in srgb,var(--warn) 18%,var(--surface));--fb:var(--warn)}
+.layer-router{--ff:color-mix(in srgb,var(--accent) 30%,var(--surface));--fb:var(--accent)}
+.box.hl .face{--fb:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.stem{position:absolute;width:0;border-left:2px dashed var(--line);transform-style:preserve-3d}
+.hint3d{position:absolute;left:12px;bottom:10px;font-size:.8rem;color:var(--muted);background:var(--surface);padding:3px 8px;border-radius:6px;border:1px solid var(--line)}
+.legend3d{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:.86rem;color:var(--muted);margin-top:10px}
+.legend3d i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px;border:1px solid}
+.parts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:14px}
+.parts dl{display:grid;grid-template-columns:9.5rem minmax(0,1fr);gap:4px 12px;margin:0;font-size:.9rem}
+.parts dt{color:var(--muted)} .parts dd{margin:0;overflow-wrap:anywhere}
+.files{font-size:.86rem;margin:6px 0 0;padding-left:1.1rem;columns:2;column-gap:24px}
+@media (max-width:640px){.scene{height:440px}.files{columns:1}}
+@media (prefers-reduced-motion:reduce){.world{transition:none}}
+.steps{margin:0;padding-left:1.2rem;display:flex;flex-direction:column;gap:6px}
+.verdict{border-width:2px} .verdict .k{font:600 .78rem var(--f-body);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 6px}
+.vhead{font-size:1.7rem;line-height:1.2;margin:0 0 8px}
+.score{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px} .score span{font:700 .95rem var(--f-body);padding:6px 14px;border-radius:999px;border:1.5px solid currentColor}
+.s-win{color:var(--ok)} .s-tie{color:var(--muted)} .s-loss{color:var(--bad)}
+ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.45}
+.vt td:first-child{min-width:12rem} .vt td:nth-child(2){white-space:nowrap}
+.res{font-weight:700} .res.win{color:var(--ok)} .res.tie{color:var(--muted)} .res.loss{color:var(--bad)}
+</style>
+
+<div class="wrap">
+  <h1>Hetero-PD Decider Lab</h1>
+  <p class="sub">How the plugin decides, what it is worth, and a place to test it live.</p>
+
+  <nav role="tablist" aria-label="Sections">
+    <button role="tab" id="t-decide" aria-controls="decide" aria-selected="true">How it decides</button>
+    <button role="tab" id="t-value" aria-controls="value" aria-selected="false">Value</button>
+    <button role="tab" id="t-traffic" aria-controls="traffic" aria-selected="false">Traffic</button>
+    <button role="tab" id="t-mode" aria-controls="mode" aria-selected="false">Router mode</button>
+    <button role="tab" id="t-stack" aria-controls="stack" aria-selected="false">The stack</button>
+  </nav>
+
+  <!-- ============ HOW IT DECIDES ============ -->
+  <section id="decide" role="tabpanel" aria-labelledby="t-decide" class="stack">
+    <div class="panel">
+      <h2>Four stages, for every request</h2>
+      <p class="muted">The router has already picked the <b>answering card</b> (decode). Your plugin decides who reads the prompt first. <b>Keep</b>: the answering card reads it itself. <b>Move</b>: another card (prefill) reads it and hands the result over. Stock llm-d's size rule gives the first answer; your plugin overrules it only when the other path is clearly cheaper. Pick a situation or change any value, and every stage recalculates.</p>
+    </div>
+    <div class="calc">
+      <div class="panel">
+        <h3>Situation</h3>
+        <div class="presets" id="presets">
+          <button data-p="busy" aria-pressed="true">Today: document, busy</button>
+          <button data-p="idle" aria-pressed="false">Today: document, idle</button>
+          <button data-p="chat" aria-pressed="false">Today: chat, busy</button>
+          <button data-p="gaudiRead" aria-pressed="false">Gaudi reads, A30 answers</button>
+          <button data-p="gaudiAns" aria-pressed="false">Gaudi answers, A30 reads</button>
+          <button data-p="full" aria-pressed="false">Memory full</button>
+          <button data-p="unknown" aria-pressed="false">New card, not measured</button>
+        </div>
+        <fieldset><legend>The request</legend>
+          <div class="in"><label for="U">New prompt tokens <var>U</var></label><input id="U" type="number" min="0" step="50"></div>
+        </fieldset>
+        <fieldset><legend>Answering card (decode)</legend>
+          <div class="in"><label for="ND">Users being served <var>N_D</var></label><input id="ND" type="number" min="0"></div>
+          <div class="in"><label for="WD">Requests waiting <var>W_D</var></label><input id="WD" type="number" min="0"></div>
+          <div class="in"><label for="KV">Memory in use, % <var>M_D</var></label><input id="KV" type="number" min="0" max="100"></div>
+          <div class="in"><label for="RD">Reading speed, tokens/s <var>R_D</var></label><input id="RD" type="number" min="1" step="500"></div>
+          <div class="chk"><input type="checkbox" id="optout"><label for="optout">Opted out of handoffs</label></div>
+        </fieldset>
+        <fieldset><legend>Best other card that could read (prefill)</legend>
+          <div class="in"><label for="WP">Requests waiting <var>W_P</var></label><input id="WP" type="number" min="0"></div>
+          <div class="in"><label for="RP">Reading speed, tokens/s <var>R_P</var></label><input id="RP" type="number" min="1" step="250"></div>
+          <div class="chk"><input type="checkbox" id="avail" checked><label for="avail">Available and serving the same model</label></div>
+          <div class="chk"><input type="checkbox" id="known" checked><label for="known">Both cards' reading speeds are measured</label></div>
+        </fieldset>
+        <fieldset><legend>Network and settings</legend>
+          <div class="in"><label for="BW">Network, Gbps <var>BW</var></label><input id="BW" type="number" min="0.1" step="1"></div>
+          <div class="in"><label for="B">Memory per token, bytes <var>b</var></label><input id="B" type="number" min="1"></div>
+          <div class="in"><label for="H">Fixed handoff cost, ms <var>H</var></label><input id="H" type="number" min="0" step="10"></div>
+          <div class="in"><label for="SLO">Deadline, ms <var>SLO</var></label><input id="SLO" type="number" min="0" step="50"></div>
+          <div class="in"><label for="STK">Stock size rule, tokens <var>S</var></label><input id="STK" type="number" min="1" step="64"></div>
+          <div class="in"><label for="MIN">Never move below, tokens <var>U_min</var></label><input id="MIN" type="number" min="0"></div>
+          <div class="in"><label for="W">Pause weight <var>w</var></label><input id="W" type="number" min="0" max="1" step="0.05"></div>
+          <div class="in"><label for="F">Share of reading time users lose <var>f</var></label><input id="F" type="number" min="0" max="1" step="0.05"></div>
+          <div class="in"><label for="O">Overrule only if cheaper by <var>o</var></label><input id="O" type="number" min="0" max="0.9" step="0.05"></div>
+          <div class="in"><label for="Q">Tokens per waiting request <var>Q</var></label><input id="Q" type="number" min="0"></div>
+        </fieldset>
+        <p class="small muted" style="margin-top:10px">A30 speed (7,035 tokens/s), handoff cost (82 ms) and f (0.1) are measured on this lab. The Gaudi speed (20,000 tokens/s) is a placeholder until the Gaudi is back.</p>
+      </div>
+
+      <div style="min-width:0">
+        <div class="stage" id="s1"><div class="sh"><span><span class="k">Stage 1</span><b>Stock's answer: is it 1,024 tokens or more?</b></span><span class="pill" id="s1p"></span></div><div class="math" id="s1m"></div></div>
+        <div class="down"></div>
+        <div class="stage" id="s2"><div class="sh"><span><span class="k">Stage 2</span><b>Safety checks: can it be moved at all?</b></span><span class="pill" id="s2p"></span></div><div class="math" id="s2m"></div></div>
+        <div class="down"></div>
+        <div class="stage" id="s3"><div class="sh"><span><span class="k">Stage 3</span><b>Price both paths with live numbers</b></span><span class="pill" id="s3p"></span></div><div class="math" id="s3m"></div></div>
+        <div class="down"></div>
+        <div class="stage" id="s4"><div class="sh"><span><span class="k">Stage 4</span><b>Overrule stock only if the other path is clearly cheaper</b></span><span class="pill" id="s4p"></span></div><div class="math" id="s4m"></div></div>
+        <div class="down"></div>
+        <div class="result" id="final"></div>
+        <div class="stock" id="stock"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Expected decisions</h2>
+      <p class="small muted">All cases have 32 users already on the answering card, except “idle”, which has none. <b>Keep</b>: the answering card reads the prompt and writes the answer. <b>Move</b>: the other card reads the prompt and hands it over; the answering card still writes the answer. A “–” cost means a safety check or missing speed data decided before any pricing.</p>
+      <div class="tablebox"><table><thead><tr><th>Situation</th><th>Request</th><th>Answering card</th><th>Other card</th><th>Stock says</th><th>Keep cost</th><th>Move cost</th><th>Plugin decides</th><th>Reads the prompt</th><th>Writes the answer</th></tr></thead><tbody>
+          <tr><td>Today, busy</td><td>2,000-token doc</td><td>A30 #2</td><td>A30 #1</td><td>Move</td><td>0.512 s</td><td>0.458 s</td><td><b>Move (agrees; keep isn’t cheaper)</b></td><td><b>A30 #1</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Today, idle</td><td>2,000-token doc</td><td>A30 #2</td><td>A30 #1</td><td>Move</td><td>0.284 s</td><td>0.458 s</td><td><b>Keep (overrules; 38% cheaper)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Today, busy</td><td>300-token chat</td><td>A30 #2</td><td>A30 #1</td><td>Keep</td><td>0.077 s</td><td>0.138 s</td><td><b>Keep (agrees)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Today, busy</td><td>150-token chat</td><td>A30 #2</td><td>A30 #1</td><td>Keep</td><td>–</td><td>–</td><td><b>Keep (under 256 tokens, never worth a handoff)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Today, answering card’s memory 95% full</td><td>2,000-token doc</td><td>A30 #2</td><td>A30 #1</td><td>Move</td><td>–</td><td>–</td><td><b>Keep (safety: moving needs the same memory on A30 #2 and can time out; keeping just waits in line)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Today, A30 #1 down</td><td>2,000-token doc</td><td>A30 #2</td><td>none</td><td>Move</td><td>–</td><td>–</td><td><b>Keep (safety: nobody to hand it to)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>Gaudi helps an A30</td><td>2,000-token doc</td><td>A30</td><td>Gaudi 3</td><td>Move</td><td>0.512 s</td><td>0.274 s</td><td><b>Move (agrees)</b></td><td><b>Gaudi 3</b></td><td><b>A30</b></td></tr>
+          <tr><td>Gaudi helps an A30</td><td>900-token doc</td><td>A30</td><td>Gaudi 3</td><td>Keep</td><td>0.230 s</td><td>0.168 s</td><td><b>Move (overrules; 27% cheaper and under 1 s)</b></td><td><b>Gaudi 3</b></td><td><b>A30</b></td></tr>
+          <tr><td>Gaudi helps an A30</td><td>700-token doc</td><td>A30</td><td>Gaudi 3</td><td>Keep</td><td>0.179 s</td><td>0.149 s</td><td><b>Keep (agrees; move only 17% cheaper, under the 25% bar)</b></td><td><b>A30</b></td><td><b>A30</b></td></tr>
+          <tr><td>Today, busy, 10 requests waiting on A30 #2</td><td>300-token chat</td><td>A30 #2</td><td>A30 #1</td><td>Keep</td><td>0.077 s</td><td>0.138 s</td><td><b>Keep (agrees; the waiting line delays both paths, so it doesn’t count)</b></td><td><b>A30 #2</b></td><td><b>A30 #2</b></td></tr>
+          <tr><td>A30 helps a Gaudi</td><td>2,000-token doc</td><td>Gaudi 3</td><td>A30</td><td>Move</td><td>0.180 s</td><td>0.458 s</td><td><b>Keep (overrules; 61% cheaper)</b></td><td><b>Gaudi 3</b></td><td><b>Gaudi 3</b></td></tr>
+          <tr><td>New card, speed not measured</td><td>2,000-token doc</td><td>any</td><td>any</td><td>Move</td><td>–</td><td>–</td><td><b>Move (no data, so stock stands)</b></td><td><b>other card</b></td><td><b>answering card</b></td></tr>
+          <tr><td>New card, speed not measured</td><td>700-token doc</td><td>any</td><td>any</td><td>Keep</td><td>–</td><td>–</td><td><b>Keep (no data, so stock stands)</b></td><td><b>answering card</b></td><td><b>answering card</b></td></tr>
+      </tbody></table></div>
+      <p class="small muted" style="margin-top:8px">Keep cost = answering card’s reading time + a charge for pausing its users. (A waiting line on the answering card delays both paths, so it doesn’t count.) Move cost = other card’s reading time + its waiting line + memory transfer + 82 ms handoff. Your plugin overrules stock only when the other path is at least 25% cheaper, and a move must finish within 1 second. Gaudi rows use a placeholder speed (20,000 tokens/s) until the Gaudi is measured.</p>
+    </div>
+  </section>
+
+  <!-- ============ VALUE ============ -->
+  <section id="value" role="tabpanel" aria-labelledby="t-value" class="stack" hidden>
+    <div class="panel" id="vEmpty" hidden><h2>No test suite yet</h2><p class="muted" style="margin:0">Run a test suite on the Traffic tab. This page then shows its outcome.</p></div>
+    <div id="vBody" class="stack">
+      <div class="panel verdict" id="vHero">
+        <p class="k" id="vWhen">—</p>
+        <h2 class="vhead" id="vHead">—</h2>
+        <p class="muted" id="vSub" style="margin:0">—</p>
+        <div class="score" id="vScore"></div>
+      </div>
+      <div class="three" id="vKpis"></div>
+      <div class="panel">
+        <h2>What this means</h2>
+        <ul class="vp" id="vPoints"></ul>
+      </div>
+      <div class="panel">
+        <h2>Scenario by scenario</h2>
+        <p class="small muted">Each scenario ran with identical traffic through stock llm-d and through your plugin. Numbers are medians across repeats; “stock → plugin”.</p>
+        <div class="tablebox"><table id="vTable" class="vt"><thead><tr><th>Scenario</th><th>Result</th><th>What happened</th></tr></thead><tbody></tbody></table></div>
+        <details style="margin-top:12px"><summary>Full numbers (medians, stock → plugin)</summary>
+          <div class="tablebox" style="margin-top:8px"><table id="vNums"><thead><tr><th>Scenario</th><th>Total output, tokens/s</th><th>Chat smoothness (word gap, slowest 5%)</th><th>Chat replies start (slowest 5%)</th><th>Documents start (typical)</th></tr></thead><tbody></tbody></table></div>
+        </details>
+      </div>
+      <div class="panel">
+        <h2>What it’s worth</h2>
+        <p id="vWorth" style="margin-top:0">—</p>
+        <div id="vSliders"><div class="cols">
+          <div class="slider"><label for="sFleet">Answering cards in the fleet</label><output id="oFleet" for="sFleet"></output><input type="range" id="sFleet" min="4" max="400" step="4" value="8"><span class="hint">Each has one reading-card partner.</span></div>
+          <div class="slider"><label for="sPrice">Cost of one answering card per hour</label><output id="oPrice" for="sPrice"></output><input type="range" id="sPrice" min="1" max="12" step="0.5" value="4"><span class="hint">Example rate. Use your own.</span></div>
+        </div>
+        <div class="assume"><label for="aA30">Reading card $ per hour<input id="aA30" type="number" min="0" step="0.1" value="1.5"></label></div></div>
+      </div>
+      <p class="small muted" id="vFine"></p>
+    </div>
+  </section>
+
+  <!-- ============ TRAFFIC ============ -->
+  <section id="traffic" role="tabpanel" aria-labelledby="t-traffic" class="stack" hidden>
+    <div class="panel offline" data-offline hidden><p style="margin:0">Traffic runs on the lab cluster. Open this page from the cluster's dashboard address to use it.</p></div>
+    <div class="panel">
+      <div class="modebar"><span class="muted">Router mode now:</span><b data-modename>—</b><span class="pill" data-modestate></span><button class="btn" data-goto="mode">Change</button></div>
+    </div>
+    <div class="cols">
+      <div class="panel">
+        <h2>Send test traffic</h2>
+        <p class="small muted">The dashboard plays real users: each chat user sends a short message, waits for the full reply, then sends the next. Long documents arrive at random on top. Everything goes through the router, like real clients.</p>
+        <div class="slider"><label for="tUsers">Chat users</label><output id="oUsers" for="tUsers"></output><input type="range" id="tUsers" min="0" max="64" step="4" value="32"><span class="hint">Each sends a message, waits for a 128-token reply, then sends the next.</span></div>
+        <div class="slider"><label for="tDocs">Long documents per second</label><output id="oDocs" for="tDocs"></output><input type="range" id="tDocs" min="0" max="2" step="0.25" value="0.5"><span class="hint">Incident reports, summarized in 64 tokens.</span></div>
+        <div class="slider"><label for="tChatTok">Chat message size</label><output id="oChatTok" for="tChatTok"></output><input type="range" id="tChatTok" min="100" max="2000" step="50" value="250"><span class="hint">Stock llm-d moves a request at 1,024 tokens or more.</span></div>
+        <div class="slider"><label for="tDocTok">Document size</label><output id="oDocTok" for="tDocTok"></output><input type="range" id="tDocTok" min="200" max="7000" step="100" value="700"></div>
+        <div class="slider"><label for="tMin">Duration</label><output id="oMin" for="tMin"></output><input type="range" id="tMin" min="1" max="10" step="1" value="3"></div>
+        <div class="actions"><button class="primary" id="startBtn">Start traffic</button><button class="danger" id="stopBtn" disabled>Stop</button></div>
+        <p class="err" id="tErr"></p>
+      </div>
+      <div class="panel">
+        <h2>Right now</h2>
+        <p class="muted" id="tStatus">No traffic running.</p>
+        <div class="prog" id="tProg" hidden><div></div></div>
+        <div class="three" style="margin-top:10px">
+          <div class="tile"><div class="v num" id="vMoved">—</div><div class="l">requests moved to the A30, per minute</div></div>
+          <div class="tile"><div class="v num" id="vKept">—</div><div class="l">requests kept on the answering card, per minute</div></div>
+        </div>
+        <div class="split" id="vSplit"><div class="m" style="flex:0"></div><div class="k" style="flex:1"></div></div>
+        <p class="small muted" style="margin-top:6px">From the router's own decision counter, all modes.</p>
+      </div>
+    </div>
+    <div>
+      <h2>What users are experiencing (last 30 seconds)</h2>
+      <div class="three">
+        <div class="tile"><div class="v num" id="m1">—</div><div class="l">chat: first words appear (slowest 5%)</div></div>
+        <div class="tile"><div class="v num" id="m2">—</div><div class="l">chat: gap between words (slowest 5%). Lower is smoother.</div></div>
+        <div class="tile"><div class="v num" id="m3">—</div><div class="l">documents: first words appear (typical)</div></div>
+        <div class="tile"><div class="v num" id="m4">—</div><div class="l">tokens generated per second, all users</div></div>
+      </div>
+    </div>
+    <div>
+      <h2>The cards</h2>
+      <div class="cards" id="podCards"></div>
+    </div>
+<div class="panel" id="suitePanel">
+      <h2>Test suite: stock vs your plugin, scenario by scenario</h2>
+      <p class="small muted">Each scenario runs twice with identical traffic: once with stock llm-d and once with your plugin. The dashboard switches the router between runs by itself. Results stay saved in the cluster.</p>
+      <div class="tablebox"><table id="scnTable"><thead><tr><th></th><th>Scenario</th><th>Traffic</th><th>Stock llm-d does</th><th>Your plugin should</th></tr></thead><tbody></tbody></table></div>
+      <div class="actions" style="margin-top:12px">
+        <label class="small" for="sRep">Repeats</label><select id="sRep" class="btn"><option>1</option><option>2</option><option selected>3</option></select>
+        <label class="small" for="sMinS">Minutes per run</label><select id="sMinS" class="btn"><option>2</option><option selected>3</option><option>5</option></select>
+        <button class="primary" id="suiteBtn">Run test suite</button><span class="small muted" id="suiteEta"></span>
+      </div>
+      <div class="prog" id="sProg" hidden><div></div></div>
+      <p class="muted" id="suiteStatus"></p>
+      <p class="err" id="sErr"></p>
+    </div>
+    <div class="panel">
+      <h2>Suite results</h2>
+      <div id="suiteSummary" class="summary" hidden>
+        <p class="sumhead" id="sumHead"></p>
+        <p class="muted" id="sumSub"></p>
+        <div class="cols">
+          <div><h3 class="w-plugin">Where your plugin wins</h3><ul id="sumPlugin" class="sumlist"></ul></div>
+          <div><h3 class="w-stock">Where stock llm-d wins</h3><ul id="sumStock" class="sumlist"></ul></div>
+        </div>
+        <p class="small muted" id="sumWhy"></p>
+      </div>
+      <p class="small muted">Medians across repeats. Green is better for your plugin, red is worse.</p>
+      <div class="tablebox"><table id="suiteRes"><thead><tr><th>Scenario</th><th>Moved to A30<br>stock → plugin</th><th>Output tokens/s</th><th>Chat word gap (slowest 5%)</th><th>Chat first words (slowest 5%)</th><th>Doc first words (typical)</th><th>Runs</th><th>Winner</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>Runs so far</h2>
+      <div class="actions" style="justify-content:space-between"><p class="small muted" style="margin:0">Every finished run, newest first. Prompt sizes are measured by the model server.</p><button class="btn" id="clearBtn">Clear saved runs</button></div>
+      <div class="tablebox"><table id="runs"><thead><tr><th>Router mode</th><th>Scenario</th><th>Chat users × tokens</th><th>Docs/s × tokens</th><th>Chat first words (slowest 5%)</th><th>Chat word gap (slowest 5%)</th><th>Doc first words</th><th>Moved to A30</th><th>Tokens/s</th><th>Errors</th><th>Winner vs. the other mode</th></tr></thead><tbody></tbody></table></div>
+      <p class="small muted" style="margin-top:8px">How the winner is picked: each run is paired with the closest run in the other router mode that has the same scenario and settings. Four numbers are compared: output, chat smoothness, chat first words and document first words. A side wins a number when it is at least 3% better. The side that wins more numbers wins; equal counts are a trade-off.</p>
+    </div>
+  </section>
+
+  <!-- ============ ROUTER MODE ============ -->
+  <section id="mode" role="tabpanel" aria-labelledby="t-mode" class="stack" hidden>
+    <div class="panel offline" data-offline hidden><p style="margin:0">Switching the router works on the lab cluster. Open this page from the cluster's dashboard address to use it.</p></div>
+    <div class="panel">
+      <div class="modebar"><span class="muted">Router mode now:</span><b data-modename>—</b><span class="pill" data-modestate></span></div>
+    </div>
+    <div class="choice">
+      <div class="opt" id="optHetero">
+        <h3>With your plugin</h3>
+        <p class="small muted" style="margin:0">hetero-pd-decider, auto</p>
+        <ul><li>Starts from stock's answer for every request.</li><li>Prices keeping and moving with live load, card speeds and network.</li><li>Overrules stock, either way, only when the other path is at least 25% cheaper.</li></ul>
+        <button class="primary" data-mode="auto" data-label="Use my plugin">Use my plugin</button>
+      </div>
+      <div class="opt" id="optStock">
+        <h3>Without your plugin</h3>
+        <p class="small muted" style="margin:0">stock llm-d, prefix-based rule</p>
+        <ul><li>Moves a request when it has 1,024 or more new tokens.</li><li>Ignores card speed, load, network and deadline.</li><li>This is the baseline to beat.</li></ul>
+        <button class="primary" data-mode="stock" data-label="Use stock llm-d">Use stock llm-d</button>
+      </div>
+    </div>
+    <p class="err" id="mErr"></p>
+    <div class="panel">
+      <h3>How to compare the two</h3>
+      <ol class="steps">
+        <li>Pick <b>Without your plugin</b>. Wait for the router to show Ready (about 30 seconds).</li>
+        <li>On the Traffic tab, start a run, for example 32 chat users and 0.5 documents per second for 3 minutes.</li>
+        <li>When it finishes, come back, pick <b>With your plugin</b>, and run the same settings again.</li>
+        <li>Compare the two rows in <b>Runs so far</b>. Smoother chat (lower word gap) and faster documents mean the plugin is helping.</li>
+      </ol>
+      <p class="small muted" style="margin-top:10px">Switching restarts the router, so stop any running traffic first. Right now the answering card is the second NVIDIA A30, standing in while the Gaudi server is repaired.</p>
+    </div>
+  </section>
+  <!-- ============ THE STACK ============ -->
+  <section id="stack" role="tabpanel" aria-labelledby="t-stack" class="stack" hidden>
+    <div class="panel" id="hwPanel">
+      <div class="hwhead"><h2 style="margin:0">Hardware health, live</h2><span><span class="pill p-idle" id="hwState">Loading…</span> <span class="small muted" id="hwAge"></span></span></div>
+      <p class="muted small" style="margin:6px 0 0">Fans, temperatures, power and network cards on each server, read from the server's own management controller (BMC) and the card drivers. Refreshes every 5 seconds. Read-only: nothing here changes the servers. Gaudi readings come from the safety watchdog, which stops Gaudi work at 80 °C.</p>
+      <ul class="issues" id="hwIssues"></ul>
+    </div>
+    <div class="panel" id="heatPanel">
+      <h2>Heat test</h2>
+      <p class="muted small" style="margin:0 0 10px">Puts steady work straight onto the cards (not through the router) so you can watch temperatures and fans react below. For Gaudi, the model server is started first (several minutes of loading and warm-up) and scaled back to 0 when the test ends. Safety: the test stops itself at 78 °C on a Gaudi and a few degrees below an A30's slowdown point; the watchdog still stops everything at 80 °C.</p>
+      <div class="presets" style="align-items:center">
+        <label class="small">Cards
+          <select class="btn" id="heatTarget"><option value="a30">A30 only</option><option value="gaudi">Gaudi 3 only</option><option value="both">A30 and Gaudi 3 together</option></select></label>
+        <label class="small" id="heatCardsL">Gaudi cards
+          <select class="btn" id="heatCards"><option value="1">1</option><option value="2">2</option></select></label>
+        <label class="small">Requests at a time, per card
+          <select class="btn" id="heatUsers"><option>1</option><option selected>2</option><option>4</option><option>8</option><option>16</option></select></label>
+        <label class="small">Minutes
+          <select class="btn" id="heatMin"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>10</option></select></label>
+        <button class="btn" id="heatGo">Start heat test</button>
+        <button class="btn" id="heatStop" hidden>Stop now</button>
+      </div>
+      <div class="small" id="heatStatus"></div>
+      <div class="err" id="heatErr"></div>
+    </div>
+    <div class="hwgrid" id="hwNodes"></div>
+    <div class="panel">
+      <h2>Last hour</h2>
+      <div class="charts">
+        <div><h3>Card temperature (°C)</h3><div class="lgd" id="lgTemp"></div><div class="chart" id="chTemp"></div></div>
+        <div><h3>Server power (W)</h3><div class="lgd" id="lgPow"></div><div class="chart" id="chPow"></div></div>
+        <div><h3>Fan speed (average RPM)</h3><div class="lgd" id="lgFan"></div><div class="chart" id="chFan"></div></div>
+        <div><h3>Fan control setting (%)</h3><div class="lgd" id="lgZone"></div><div class="chart" id="chZone"></div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>What runs where</h2>
+      <p class="muted">Each server holds GPU cards. Above each card, read from the bottom up: the driver that lets the operating system talk to the card, the vLLM server that runs on it, and the AI model it serves. The router in front decides which card does what. <span id="stackSrc"></span></p>
+      <div class="scene" id="scene" aria-label="3D view of the lab servers, GPU cards and software. Drag to rotate." role="img">
+        <div class="stage3d"><div class="world" id="world"></div></div>
+        <span class="hint3d">Drag to rotate · double-click to reset</span>
+      </div>
+      <div class="legend3d"><span><i style="background:color-mix(in srgb,var(--nv) 28%,var(--surface));border-color:var(--nv)"></i>NVIDIA card</span><span><i style="background:color-mix(in srgb,var(--gd) 28%,var(--surface));border-color:var(--gd)"></i>Intel Gaudi card</span><span><i style="background:color-mix(in srgb,var(--bad) 22%,var(--surface));border-color:var(--bad)"></i>card down</span><span><i style="background:color-mix(in srgb,var(--muted) 16%,var(--surface));border-color:var(--muted)"></i>driver</span><span><i style="background:color-mix(in srgb,var(--accent) 20%,var(--surface));border-color:var(--accent)"></i>vLLM server</span><span><i style="background:color-mix(in srgb,var(--warn) 18%,var(--surface));border-color:var(--warn)"></i>AI model</span></div>
+    </div>
+    <div class="parts" id="parts"></div>
+  </section>
+
+</div>
+
+<script>
+(function(){
+"use strict";
+const $=id=>document.getElementById(id);
+const fmtN=(d,dp=0)=>Number(d).toLocaleString('en',{minimumFractionDigits:dp,maximumFractionDigits:dp});
+const secs=s=>s==null?'—':s>=1?s.toFixed(2)+' s':Math.round(s*1000)+' ms';
+const esc=s=>String(s);
+
+// ---------- tabs ----------
+const tabs=[...document.querySelectorAll('nav [role=tab]')];
+function show(id){tabs.forEach(t=>{const on=t.getAttribute('aria-controls')===id;t.setAttribute('aria-selected',on);$(t.getAttribute('aria-controls')).hidden=!on;});
+  if(id==='stack'){invT=0;requestAnimationFrame(()=>{drawStack();loadInv();loadHW();});}
+  if(location.hash.slice(1)!==id)history.replaceState(null,'','#'+id);}
+tabs.forEach(t=>t.addEventListener('click',()=>show(t.getAttribute('aria-controls'))));
+document.querySelectorAll('[data-goto]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.goto)));
+window.addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(tabs.some(t=>t.getAttribute('aria-controls')===h))show(h);});
+
+// ---------- four stages (same rule as plugin/src/hetero/decide.go) ----------
+const BASE={U:2000,ND:32,WD:0,KV:40,RD:7035,WP:0,RP:7035,BW:10,B:57344,H:82,SLO:1000,STK:1024,MIN:256,W:0.25,F:0.1,O:0.25,Q:1024,optout:false,avail:true,known:true};
+const PRESETS={busy:{},idle:{ND:0},chat:{U:300},gaudiRead:{RP:20000},gaudiAns:{RD:20000},full:{KV:95},unknown:{RD:20000,known:false}};
+const FIELDS=['U','ND','WD','KV','RD','WP','RP','BW','B','H','SLO','STK','MIN','W','F','O','Q'];const CHECKS=['optout','avail','known'];
+function setPreset(name){const v=Object.assign({},BASE,PRESETS[name]);FIELDS.forEach(f=>$(f).value=v[f]);CHECKS.forEach(c=>$(c).checked=v[c]);
+  document.querySelectorAll('#presets button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.p===name?'true':'false'));drawStages();}
+document.querySelectorAll('#presets button').forEach(b=>b.addEventListener('click',()=>setPreset(b.dataset.p)));
+FIELDS.concat(CHECKS).forEach(f=>$(f).addEventListener('input',()=>{document.querySelectorAll('#presets button').forEach(b=>b.setAttribute('aria-pressed','false'));drawStages();}));
+function vals(){const v={};FIELDS.forEach(f=>v[f]=Math.max(0,Number($(f).value)||0));v.RD=Math.max(1,v.RD);v.RP=Math.max(1,v.RP);v.BW=Math.max(0.01,v.BW);v.STK=Math.max(1,v.STK);v.O=Math.min(0.9,v.O);CHECKS.forEach(c=>v[c]=$(c).checked);return v;}
+// Same rule as decideAuto in plugin/src/hetero/decide.go
+function decide(v){
+  const r={stockMove:v.U>=v.STK,stop:2};
+  r.fail=v.U<=0?'short-prompt':v.optout?'decode-disabled':v.KV/100>=0.9?'decode-kv-full':!v.avail?'no-prefill-candidate':(!r.stockMove&&v.U<v.MIN)?'short-prompt':null;
+  if(r.fail){r.move=false;r.reason=r.fail;return r;}
+  r.move=r.stockMove;r.reason=r.stockMove?'stock-split':'stock-keep';
+  if(!v.known){r.stop=3;return r;}
+  r.read=v.U/v.RD;r.pause=v.F*v.ND*v.U/v.RD;r.keepC=r.read+v.W*r.pause;   // the answering card's waiting line delays both paths, so it is left out
+  r.readP=v.U/v.RP;r.waitP=v.WP*v.Q/v.RP;r.xfer=v.U*v.B/(v.BW*1e9/8);r.moveC=r.readP+r.waitP+r.xfer+v.H/1000;
+  r.stop=4;const sure=1-v.O;
+  if(r.stockMove){if(r.keepC<=sure*r.moveC){r.move=false;r.reason='override-keep';}}
+  else{r.late=v.SLO>0&&r.moveC*1000>v.SLO;if(r.moveC<=sure*r.keepC&&!r.late){r.move=true;r.reason='override-move';}}
+  return r;
+}
+const s3=x=>x.toFixed(3)+' s';
+function pill(id,cls,text){const p=$(id);p.className='pill '+cls;p.textContent=text;}
+function stage(id,state){const e=$(id);e.className='stage '+state;}
+function drawStages(){
+  const v=vals(),d=decide(v),S=d.stockMove?'MOVE':'KEEP';
+  $('s1m').textContent=`U = ${fmtN(v.U)} new tokens      S = ${fmtN(v.STK)}\nIs U ≥ S?  ${fmtN(v.U)} ≥ ${fmtN(v.STK)}  →  stock says ${S}\nThis is the starting answer. Your plugin keeps it unless stage 4 overrules it.`;
+  stage('s1','go');pill('s1p',d.stockMove?'p-move':'p-stop','Stock: '+(d.stockMove?'Move':'Keep'));
+  const memOk=v.KV<90,bigOk=d.stockMove||v.U>=v.MIN;
+  $('s2m').textContent=[`Answering card opted out?          ${v.optout?'yes  ✗':'no   ✓'}`,
+    `Answering card memory M_D < 90%?   ${fmtN(v.KV)}%  ${memOk?'✓':'✗  nearly full: moving needs the same room, keep is safer'}`,
+    `Another card free, same model?     ${v.avail?'yes  ✓':'no   ✗'}`,
+    `Worth a handoff at all (U ≥ U_min)? ${fmtN(v.U)} ≥ ${fmtN(v.MIN)}  ${bigOk?'✓':'✗'}`].join('\n')+`\n→  ${d.fail?'KEEP ('+d.fail+'). Stops here.':'all clear, continue'}`;
+  stage('s2',d.fail?'stopped':'go');pill('s2p',d.fail?'p-stop':'p-ok',d.fail?'Keep':'Continue');
+  if(d.stop>=3&&!v.known){$('s3m').textContent=`No measured reading speed for one of the cards.\n→  Nothing to price, so stock's answer stands: ${S} (${d.reason}).`;stage('s3','stopped');pill('s3p','p-idle','No data');}
+  else if(d.stop===4){
+    $('s3m').textContent=
+`keep = U ÷ R_D + w × f × N_D × U ÷ R_D
+     = ${fmtN(v.U)} ÷ ${fmtN(v.RD)} + ${v.W} × ${v.F} × ${v.ND} × ${fmtN(v.U)} ÷ ${fmtN(v.RD)}
+     = ${s3(d.read)} + ${s3(v.W*d.pause)}                      = ${s3(d.keepC)}
+     (its waiting line delays both paths equally, so it is left out)
+
+move = U ÷ R_P + W_P × Q ÷ R_P + U × b ÷ (BW ÷ 8) + H
+     = ${fmtN(v.U)} ÷ ${fmtN(v.RP)} + ${v.WP} × ${fmtN(v.Q)} ÷ ${fmtN(v.RP)} + ${fmtN(v.U)} × ${fmtN(v.B)} ÷ ${fmtN(v.BW*1e9/8)} + ${v.H} ms
+     = ${s3(d.readP)} + ${s3(d.waitP)} + ${s3(d.xfer)} + ${s3(v.H/1000)}   = ${s3(d.moveC)}`;
+    stage('s3','go');pill('s3p','p-ok','Priced');
+  } else {$('s3m').textContent='Not reached.';stage('s3','skip');pill('s3p','p-idle','Skipped');}
+  if(d.stop===4){
+    const sure=1-v.O;let t;
+    if(d.stockMove){t=`Stock says MOVE. Overrule to KEEP if  keep ≤ (1 − o) × move\n   ${s3(d.keepC)} ≤ (1 − ${v.O}) × ${s3(d.moveC)} = ${s3(sure*d.moveC)} ?  →  ${d.move?'no, stock’s MOVE stands':'yes, OVERRULE to KEEP'}`;}
+    else{t=`Stock says KEEP. Overrule to MOVE if  move ≤ (1 − o) × keep  and  move ≤ SLO\n   ${s3(d.moveC)} ≤ (1 − ${v.O}) × ${s3(d.keepC)} = ${s3(sure*d.keepC)} ?  ${d.moveC<=sure*d.keepC?'yes':'no'}\n   ${s3(d.moveC)} ≤ ${(v.SLO/1000).toFixed(3)} s ?  ${v.SLO<=0?'no deadline set':d.late?'no':'yes'}\n→  ${d.move?'OVERRULE to MOVE':'stock’s KEEP stands'}`;}
+    const cheap=Math.min(d.keepC,d.moveC),dear=Math.max(d.keepC,d.moveC);
+    t+=`\n\nThe cheaper path (${d.keepC<=d.moveC?'keep':'move'}) saves ${Math.round(100*(1-cheap/dear))}%; the bar to overrule is ${Math.round(100*v.O)}%.`;
+    $('s4m').textContent=t;const over=d.reason.startsWith('override');
+    stage('s4',d.move?'moved':'stopped');pill('s4p',over?'p-move':'p-ok',over?'Overruled':'Stock stands');
+  } else {$('s4m').textContent='Not reached.';stage('s4','skip');pill('s4p','p-idle','Skipped');}
+  const f=$('final');f.className='result '+(d.move?'move':'keep');
+  f.textContent=d.move?'MOVE: the other card reads the prompt, then hands it to the answering card':'KEEP: the answering card reads the prompt itself';
+  const sm=document.createElement('small');
+  sm.textContent=`Reason label: ${d.reason}.`+(d.stop===4?` Estimated cost: keep ${secs(d.keepC)}, move ${secs(d.moveC)}.`:'');f.appendChild(sm);
+  const same=d.move===d.stockMove;
+  $('stock').textContent=`Stock llm-d on the same request: ${S}. `+(same?'Your plugin agrees.':d.fail?'Your plugin keeps it because a safety check failed.':`Your plugin overruled it because ${d.move?'moving':'keeping'} is clearly cheaper.`);
+}
+
+// ---------- value ----------
+function drawValue(){$('oFleet').value=fmtN(Number($('sFleet').value));$('oPrice').value='$'+Number($('sPrice').value).toFixed(2);}
+['sFleet','sPrice','aA30'].forEach(i=>$(i).addEventListener('input',()=>{drawValue();drawMeasured();}));
+
+// ---------- traffic + router mode (cluster only) ----------
+let S=null,online=false;
+const PLUGIN_MODES={auto:'Your plugin (auto)',hetero:'Old cost model',guarded:'Stock + safety checks'};const isPlug=m=>Object.prototype.hasOwnProperty.call(PLUGIN_MODES,m);
+const MODE_NAME={hetero:'Your plugin (old cost model)',guarded:'Your plugin (stock + safety checks)',auto:'With your plugin (auto)',stock:'Without your plugin (stock llm-d)',always:'Test mode (every request moved)',unknown:'Unknown'};
+function api(path,body){return fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store'}).then(r=>r.json().then(j=>{if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}));}
+function poll(){api('api/state').then(j=>{S=j;online=true;drawLive();drawMeasured();if(!$('stack').hidden)loadInv();}).catch(()=>{online=false;drawLive();drawMeasured();});}
+setInterval(poll,2000);poll();
+[['tUsers','oUsers',x=>x],['tDocs','oDocs',x=>Number(x).toFixed(2)],['tMin','oMin',x=>x+' min'],['tChatTok','oChatTok',x=>fmtN(x)+' tokens'],['tDocTok','oDocTok',x=>fmtN(x)+' tokens']].forEach(([i,o,f])=>{const u=()=>$(o).value=f($(i).value);$(i).addEventListener('input',u);u();});
+$('startBtn').addEventListener('click',()=>{$('tErr').textContent='';api('api/traffic/start',{users:Number($('tUsers').value),docsPerSec:Number($('tDocs').value),minutes:Number($('tMin').value),chatTokens:Number($('tChatTok').value),docTokens:Number($('tDocTok').value)}).then(poll).catch(e=>$('tErr').textContent=e.message);});
+$('stopBtn').addEventListener('click',()=>api('api/traffic/stop',{}).then(poll).catch(e=>$('tErr').textContent=e.message));
+document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>{$('mErr').textContent='';api('api/mode',{mode:b.dataset.mode}).then(poll).catch(e=>$('mErr').textContent=e.message);}));
+
+// ---------- test suite ----------
+const SCN=[
+  ['busy-chat','Busy chat','32 chat users, ~250-token messages','Never moves (under 1,024)','Move some to the idle reader, so chat stays smooth'],
+  ['busy-medium','Busy + medium documents','32 chat users + 0.5 docs/s of ~700 tokens','Never moves','Move documents while the answering card is busy'],
+  ['busy-long','Busy + long documents','32 chat users + 0.5 docs/s of ~2,000 tokens','Moves the documents','Also move them: same call where stock is right'],
+  ['idle-long','Idle + long documents','No chat, 0.5 docs/s of ~2,000 tokens','Moves every document','Keep them: nobody is waiting, so moving only adds delay'],
+  ['busy-huge','Busy + very long reports','32 chat users + 0.2 docs/s of ~6,000 tokens','Moves the reports','Keep them if moving would miss the 1-second target'],
+  ['light-chat','Light chat','8 chat users, ~250-token messages','Never moves','Move little: few users would be paused']];
+const SCN_NAME=Object.fromEntries(SCN.map(r=>[r[0],r[1]]));
+(function(){const tb=$('scnTable').tBodies[0];SCN.forEach(([id,name,traffic,stock,plug])=>{const tr=document.createElement('tr');const c=document.createElement('td');const cb=document.createElement('input');cb.type='checkbox';cb.checked=true;cb.value=id;cb.id='scn-'+id;cb.setAttribute('aria-label',name);c.appendChild(cb);tr.appendChild(c);
+  const n=document.createElement('td');const lb=document.createElement('label');lb.htmlFor=cb.id;const b=document.createElement('b');b.textContent=name;lb.appendChild(b);n.appendChild(lb);tr.appendChild(n);[traffic,stock,plug].forEach(x=>td(tr,x));tb.appendChild(tr);});})();
+const svModes=()=>['auto'];
+function suiteEta(){const n=[...document.querySelectorAll('#scnTable input:checked')].length,k=1+svModes().length,r=Number($('sRep').value),m=Number($('sMinS').value);const mins=Math.round(n*k*r*(m+1.2));$('suiteEta').textContent=n&&k>1?`${n*k*r} runs, about ${mins>=60?Math.floor(mins/60)+' h '+(mins%60)+' min':mins+' min'}`:'';}
+document.querySelectorAll('#scnTable input,#sRep,#sMinS').forEach(e=>e.addEventListener('change',suiteEta));suiteEta();
+$('suiteBtn').addEventListener('click',()=>{$('sErr').textContent='';const ids=[...document.querySelectorAll('#scnTable input:checked')].map(c=>c.value);
+  api('api/suite/start',{scenarios:ids,modes:svModes(),repeats:Number($('sRep').value),minutes:Number($('sMinS').value)}).then(poll).catch(e=>$('sErr').textContent=e.message);});
+$('clearBtn').addEventListener('click',()=>{const b=$('clearBtn');if(b.dataset.confirm!=='1'){b.dataset.confirm='1';b.textContent='Click again to clear';setTimeout(()=>{b.dataset.confirm='';b.textContent='Clear saved runs';},4000);return;}
+  b.dataset.confirm='';b.textContent='Clear saved runs';api('api/history/clear',{}).then(poll).catch(e=>$('tErr').textContent=e.message);});
+
+// ---------- winner ----------
+const METRICS=[['tokensPerSec',false,'output'],['chatItlP95',true,'chat smoother'],['chatTtftP95',true,'chat starts faster'],['docTtftP50',true,'documents start faster']];
+function share(x){if(!x)return null;if(x.movedShare!=null)return x.movedShare;return x.moved+x.kept?x.moved/(x.moved+x.kept):null;}
+function verdict(st,he){
+  if(!st||!he)return null;
+  const pw=[],sw=[];
+  METRICS.forEach(([k,lower,label])=>{const a=st[k],b=he[k];if(a==null||b==null||!a||!b)return;
+    const ch=b/a-1;if(Math.abs(ch)<0.03)return;const pluginBetter=lower?ch<0:ch>0;
+    // size of the winner's advantage, measured against the loser
+    const win=pluginBetter?b:a, lose=pluginBetter?a:b;
+    const amt=lower?Math.round(100*(1-win/lose)):Math.round(100*(win/lose-1));
+    const txt=k==='tokensPerSec'?`+${amt}% output`:`${label} by ${amt}%`;(pluginBetter?pw:sw).push(txt);});
+  if((st.errors||0)>0&&!(he.errors>0))pw.push('no errors');
+  if((he.errors||0)>0&&!(st.errors>0))sw.push('no errors');
+  const w=pw.length>sw.length?'plugin':sw.length>pw.length?'stock':'tie';
+  // Same decisions (share of moved requests within half a point): differences are run-to-run noise, not the plugin.
+  const a=share(st),b=share(he);
+  if(w!=='tie'&&a!=null&&b!=null&&Math.abs(a-b)<0.005)return {w:'tie',label:'Tie',pw,sw,same:true};
+  return {w,label:w==='plugin'?'Your plugin':w==='stock'?'Stock llm-d':(pw.length&&sw.length?'Trade-off':'Tie'),pw,sw};
+}
+function winnerCell(tr,v){const c=document.createElement('td');if(!v){c.className='muted';c.textContent='Run the other mode with the same settings to compare.';tr.appendChild(c);return;}
+  const d=document.createElement('div');d.className='win';const b=document.createElement('b');b.className='w-'+v.w;b.textContent=v.label;d.appendChild(b);
+  if(v.pw.length){const x=document.createElement('span');x.className='small';x.textContent='Plugin: '+v.pw.join(', ');d.appendChild(x);}
+  if(v.sw.length){const x=document.createElement('span');x.className='small muted';x.textContent='Stock: '+v.sw.join(', ');d.appendChild(x);}
+  if(v.same){const x=document.createElement('span');x.className='small muted';x.textContent='Same decisions as stock, so the differences are run-to-run noise.';d.appendChild(x);}
+  else if(!v.pw.length&&!v.sw.length){const x=document.createElement('span');x.className='small muted';x.textContent='All four numbers within 3%.';d.appendChild(x);}
+  c.appendChild(d);tr.appendChild(c);}
+const same=(a,b)=>a.scenario===b.scenario&&a.users===b.users&&a.docsPerSec===b.docsPerSec&&a.minutes===b.minutes&&(a.chatTokens||250)===(b.chatTokens||250)&&(a.docTokens||650)===(b.docTokens||650);
+function twin(h,H){const c=H.filter(x=>x!==h&&(isPlug(h.mode)?x.mode==='stock':h.mode==='stock'&&isPlug(x.mode))&&same(x,h));if(!c.length)return null;
+  return c.reduce((a,b)=>Math.abs(b.startedAt-h.startedAt)<Math.abs(a.startedAt-h.startedAt)?b:a);}
+
+const WHY={'busy-chat':'it moved chat reading off the busy card, which stock never does below 1,024 tokens',
+ 'busy-medium':'it moved medium documents while the answering card was busy, which stock never does below 1,024 tokens',
+ 'busy-long':'both routers move long documents here; the difference is how many it keeps when moving would not help',
+ 'idle-long':'with nobody waiting, it kept documents on the answering card instead of paying for a handoff',
+ 'busy-huge':'it kept very long reports that would have missed the 1-second target if moved',
+ 'light-chat':'with few users to protect, it moved less than it does under heavy load'};
+const GUARD_WHY={'idle-long':'with nobody waiting, keeping a document was clearly cheaper than a handoff, so it overruled stock'};
+function drawSummary(rows,su){
+  const box=$('suiteSummary');const done=rows.filter(r=>r.v);if(!done.length){box.hidden=true;return;}box.hidden=false;
+  const running=!!(su&&su.running);const vs=[...new Set(done.map(r=>r.vm))];const many=vs.length>1;
+  const line=vm=>{const d=done.filter(r=>r.vm===vm),n={plugin:0,stock:0,tie:0};d.forEach(r=>n[r.v.w]++);
+    const outs=d.map(r=>r.M2.tokensPerSec&&r.M1.tokensPerSec?r.M2.tokensPerSec/r.M1.tokensPerSec-1:null),mo=med(outs);
+    const lead=n.plugin>n.stock?'your plugin wins':n.stock>n.plugin?'stock llm-d wins':'even';
+    return {n,d,mo,text:`${PLUGIN_MODES[vm]}: ${lead}. Plugin ${n.plugin}, stock ${n.stock}, tie ${n.tie} of ${d.length} scenario${d.length>1?'s':''}`+(mo!=null?`, output ${(mo>=0?'+':'')}${(mo*100).toFixed(1)}%`:'')+'.'};};
+  const L=vs.map(vm=>({vm,...line(vm)}));
+  // headline: the best setting = most wins minus losses
+  const best=L.slice().sort((x,y)=>(y.n.plugin-y.n.stock)-(x.n.plugin-x.n.stock))[0];
+  const bn=best.n;
+  $('sumHead').textContent=(running?'So far: ':'')+(bn.stock===0&&bn.plugin>0?`${many?PLUGIN_MODES[best.vm]+' is the best setting: it ':'Your plugin '}never loses to stock and wins ${bn.plugin} of ${best.d.length}`:
+    bn.plugin>bn.stock?`${many?PLUGIN_MODES[best.vm]+': your':'Your'} plugin won ${bn.plugin} of ${best.d.length} scenarios`:
+    bn.stock>bn.plugin?`Stock llm-d won ${bn.stock} of ${best.d.length} scenarios${many?', even against your best setting, '+PLUGIN_MODES[best.vm]:''}`:`Even: ${bn.plugin} each, out of ${best.d.length}`)+(bn.tie?`; ${bn.tie} tie${bn.tie>1?'s':''}`:'');
+  $('sumSub').textContent=L.map(x=>x.text).join('  ')+(running?' The suite is still running.':'');
+  const ul1=$('sumPlugin'),ul2=$('sumStock');ul1.replaceChildren();ul2.replaceChildren();
+  const tag=r=>many?` (${PLUGIN_MODES[r.vm]})`:'';
+  done.forEach(r=>{const why=r.vm==='hetero'?WHY[r.id]:GUARD_WHY[r.id];
+    if(r.v.w==='plugin'||(r.v.w==='tie'&&!r.v.same&&r.v.pw.length)){const li=document.createElement('li');li.textContent=`${r.name}${tag(r)}: ${r.v.pw.join(', ')}.`+(why?` Why: ${why}.`:'');ul1.appendChild(li);}
+    if(r.v.w==='stock'||(r.v.w==='tie'&&!r.v.same&&r.v.sw.length)){const li=document.createElement('li');li.textContent=`${r.name}${tag(r)}: ${r.v.sw.join(', ')}.`;ul2.appendChild(li);}});
+  [[ul1,'None yet.'],[ul2,'None.']].forEach(([u,t])=>{if(!u.children.length){const li=document.createElement('li');li.className='muted';li.textContent=t;u.appendChild(li);}});
+  $('sumWhy').textContent='Your plugin starts from stock’s answer and overrules it only when the other path is at least 25% cheaper, so where it agrees with stock the results should match. On today’s A30-to-A30 setup both cards read at the same speed, so it mainly overrules wasted handoffs. With the Gaudi in the pool, card speed adds more cases where one path is clearly cheaper. Rows marked “vs Old cost model” are the earlier version, kept for comparison.';
+}
+const med=xs=>{const v=xs.filter(x=>x!=null).sort((a,b)=>a-b);if(!v.length)return null;const m=Math.floor(v.length/2);return v.length%2?v[m]:(v[m-1]+v[m])/2;};
+function drawSuite(){
+  const su=S&&S.suite||{};const running=!!su.running;
+  $('suiteBtn').disabled=!online||running||!!(S&&S.traffic&&S.traffic.running);
+  if(running&&su.total){$('sProg').hidden=false;$('sProg').firstElementChild.style.width=(100*su.done/su.total)+'%';
+    const c=su.current;$('suiteStatus').textContent=`Run ${Math.min(su.done+1,su.total)} of ${su.total}`+(c?`: ${c.name}, ${c.mode==='stock'?'stock llm-d':'your plugin ('+(PLUGIN_MODES[c.mode]||c.mode)+')'}, repeat ${c.repeat}.`:'.')+' Use Stop above to end early.';}
+  else{$('sProg').hidden=true;$('suiteStatus').textContent=su.error?'':(su.total?`Last suite finished: ${su.done} of ${su.total} runs.`:'');}
+  if(su.error)$('sErr').textContent=su.error;
+  const tb=$('suiteRes').tBodies[0];tb.replaceChildren();const H=(S&&S.history)||[];let any=false;const sumRows=[];
+  const vs=Object.keys(PLUGIN_MODES).filter(v=>H.some(h=>h.mode===v&&h.scenario));
+  const LS=Object.fromEntries(vs.map(vm=>[vm,latestSuite(H,vm)]));
+  SCN.forEach(([id,name])=>vs.forEach(vm=>{const L=LS[vm];if(!L)return;const st=L.St.filter(h=>h.scenario===id),he=L.P.filter(h=>h.scenario===id);if(!he.length)return;any=true;
+    const tr=document.createElement('tr');const nc=document.createElement('td');const nb=document.createElement('div');nb.textContent=name;const ns=document.createElement('div');ns.className='small muted';ns.textContent='vs '+PLUGIN_MODES[vm];nc.append(nb,ns);tr.appendChild(nc);
+    const mvp=a=>{const m=med(a.map(x=>x.moved+x.kept?x.moved/(x.moved+x.kept):null));return m==null?'—':Math.round(100*m)+'%';};td(tr,mvp(st)+' → '+mvp(he));
+    const cell=(key,lowerBetter,fmt)=>{const a=med(st.map(x=>x[key])),b=med(he.map(x=>x[key]));const c=document.createElement('td');
+      if(a==null&&b==null){c.textContent='—';tr.appendChild(c);return;}
+      const t=document.createElement('div');t.textContent=`${fmt(a)} → ${fmt(b)}`;c.appendChild(t);
+      if(a&&b){const ch=b/a-1,good=lowerBetter?ch<0:ch>0,cls=Math.abs(ch)<0.03?'same-t':good?'ok-t':'bad-t';const s=document.createElement('div');s.className='small '+cls;s.textContent=(ch>=0?'+':'')+(ch*100).toFixed(0)+'%'+(Math.abs(ch)<0.03?' (same)':good?' better':' worse');c.appendChild(s);}
+      tr.appendChild(c);};
+    cell('tokensPerSec',false,x=>x==null?'—':fmtN(x));cell('chatItlP95',true,secs);cell('chatTtftP95',true,secs);cell('docTtftP50',true,secs);
+    td(tr,`${st.length} + ${he.length}`);
+    const M=a=>a.length?Object.fromEntries(METRICS.map(([k])=>[k,med(a.map(x=>x[k]))]).concat([['errors',a.reduce((s,x)=>s+(x.errors||0),0)],['movedShare',med(a.map(share))]])):null;
+    const vv=verdict(M(st),M(he));winnerCell(tr,vv);tb.appendChild(tr);if(st.length&&he.length)sumRows.push({id,name,vm,v:vv,M1:M(st),M2:M(he)});}));
+  drawSummary(sumRows,su);
+  if(!any){const tr=document.createElement('tr');const c=document.createElement('td');c.colSpan=8;c.className='muted';c.textContent='No suite runs yet.';tr.appendChild(c);tb.appendChild(tr);}
+}
+
+
+
+// ---------- heat test (Stack tab) ----------
+function heatCardsVis(){$('heatCardsL').hidden=$('heatTarget').value==='a30';}
+$('heatTarget').addEventListener('change',heatCardsVis);heatCardsVis();
+$('heatGo').addEventListener('click',()=>{$('heatErr').textContent='';
+  const b={target:$('heatTarget').value,gaudiCards:+$('heatCards').value,users:+$('heatUsers').value,minutes:+$('heatMin').value};
+  api('api/heat/start',b).then(()=>loadHW()).catch(e=>{$('heatErr').textContent=e.message;});});
+$('heatStop').addEventListener('click',()=>{api('api/heat/stop',{}).then(()=>loadHW()).catch(e=>{$('heatErr').textContent=e.message;});});
+function drawHeat(){
+  const h=(HWD&&HWD.heat)||{};const run=!!h.running;
+  if(run){$('heatTarget').value=h.target;$('heatCards').value=String(h.cards||1);$('heatUsers').value=String(h.users);$('heatMin').value=String(h.minutes);heatCardsVis();}
+  $('heatGo').hidden=run;$('heatStop').hidden=!run;['heatTarget','heatCards','heatUsers','heatMin'].forEach(i=>$(i).disabled=run);
+  const s=$('heatStatus');s.replaceChildren();
+  if(!h.phase||h.phase==='idle'){s.textContent='No heat test has run since the dashboard started.';return;}
+  const now=Date.now()/1000;const tgt={a30:'A30',gaudi:'Gaudi 3',both:'A30 and Gaudi 3'}[h.target]||h.target;
+  const p=document.createElement('div');
+  const pl=document.createElement('span');pl.className='pill '+(h.phase==='load'?'p-move':h.phase==='starting'?'p-warn':h.phase==='stopped'?'p-bad':'p-ok');
+  pl.textContent={load:'Load running',starting:'Starting',stopped:'Stopped',done:'Finished'}[h.phase]||h.phase;p.append(pl,' ',`${tgt} · ${h.users} at a time per card · ${h.minutes} min`);s.appendChild(p);
+  if(h.msg)s.appendChild(txt('div',h.msg,h.phase==='stopped'?'bad-t':''));
+  if(h.started){const el=Math.max(0,Math.min(now,h.until)-h.started);const left=Math.max(0,h.until-now);
+    s.appendChild(txt('div',`${run&&h.phase==='load'?`${Math.floor(left/60)}:${String(Math.floor(left%60)).padStart(2,'0')} left · `:''}${fmtN(h.done)} requests done · ${el>0?fmtN(h.tokens/el,0):0} tokens/s · ${fmtN(h.errors)} errors${h.lastErr?' (last: '+h.lastErr+')':''}`,'muted'));}
+}
+
+// ---------- live hardware (Stack tab) ----------
+let HWD=null,hwBusy=false;
+function loadHW(){if(hwBusy)return;hwBusy=true;api('api/hw').then(j=>{HWD=j;drawHW();}).catch(()=>{HWD=null;drawHW();}).finally(()=>{hwBusy=false;});}
+setInterval(()=>{if(!$('stack').hidden)loadHW();},5000);
+const f0=v=>v==null?'—':fmtN(v,0);
+const lvl=(v,warn,crit)=>v==null?'':crit!=null&&v>=crit?'b':warn!=null&&v>=warn?'w':'';
+function hbar(v,max,l){const d=document.createElement('div');d.className='hbar';const i=document.createElement('i');i.style.width=Math.max(2,Math.min(100,v/max*100))+'%';if(l)i.className=l;d.appendChild(i);return d;}
+function tbl(head,rows){const box=document.createElement('div');box.className='tablebox';const t=document.createElement('table');const th=document.createElement('tr');head.forEach(h=>th.appendChild(txt('th',h)));const tb=document.createElement('tbody');
+  rows.forEach(r=>{const tr=document.createElement('tr');r.forEach(c=>{const d=document.createElement('td');if(c instanceof Node)d.appendChild(c);else d.textContent=c==null?'—':c;tr.appendChild(d);});tb.appendChild(tr);});
+  const thd=document.createElement('thead');thd.appendChild(th);t.append(thd,tb);box.appendChild(t);return box;}
+function cardStop(c){return c.vendor==='Intel'?80:(c.slowdown||c.maxOp||85);}
+function drawHW(){
+  const st=$('hwState'),nodesEl=$('hwNodes'),iss=$('hwIssues');iss.replaceChildren();nodesEl.replaceChildren();
+  if(!HWD){st.className='pill p-idle';st.textContent=online?'Not available':'Offline';$('hwAge').textContent='';
+    iss.appendChild(txt('li','Live hardware readings need the hw-monitor service (lab/hwmon/53-hw-monitor.sh) and the dashboard opened from the cluster.'));return;}
+  const issues=[];const now=Date.now()/1000;
+  $('hwAge').textContent='updated '+Math.max(0,Math.round(now-HWD.t))+' s ago';
+  const nodes=(HWD.nodes||[]).slice().sort((a,b)=>(a.node||'').localeCompare(b.node||''));
+  nodes.forEach(n=>{
+    const sh=(n.node||'?').split('.')[0];const p=document.createElement('div');p.className='panel';nodesEl.appendChild(p);
+    const sv=n.server||{};
+    p.appendChild(txt('h3',`${sh}${sv.model?' · '+(sv.maker||'').replace(/ Inc\.?| Computer| Cloud Technology/g,'')+' '+sv.model:''}`));
+    if(n.error){p.appendChild(txt('p',n.error,'muted small'));issues.push(['w',`${sh}: ${n.error}`]);return;}
+    p.appendChild(txt('div',[sv.bios&&'BIOS '+sv.bios,sv.bmc&&'BMC firmware '+sv.bmc,sv.upSince&&'up since '+sv.upSince].filter(Boolean).join(' · '),'small muted'));
+    let cards=(n.cards||[]).map(c=>({...c}));
+    if(HWD.gaudiNode&&HWD.gaudiNode===n.node)cards=cards.concat((HWD.gaudi||[]).map(g=>({vendor:'Intel',id:g.id,c:g.c,w:g.w,limitW:600,util:g.util,serial:g.serial,stale:g.stale})));
+    const zones=n.zones||[],fans=n.fans||[],temps=n.temps||[];
+    const inlet=temps.find(t=>/inlet|ambient/i.test(t.name));const exh=temps.find(t=>/exhaust|outlet/i.test(t.name));
+    const rpm=fans.map(f=>f.rpm);const avg=rpm.length?rpm.reduce((a,b)=>a+b,0)/rpm.length:null;
+    const mini=document.createElement('div');mini.className='mini';
+    const m=(v,l)=>{const d=document.createElement('div');d.append(txt('b',v),txt('span',l));mini.appendChild(d);};
+    m(zones.length?zones.map(z=>f0(z.pct)).join(' / ')+'%':avg!=null?fmtN(avg/1000,1)+'k':'—',zones.length?'fan control setting':'fan RPM (average)');
+    m(inlet?f0(inlet.c)+' °C':'—','air in'+(exh?` · out ${f0(exh.c)} °C`:''));
+    m(n.power!=null?f0(n.power)+' W':'—','server power');
+    const hc=cards.reduce((a,c)=>c.c!=null&&(a==null||c.c>a.c)?c:a,null);
+    m(hc?f0(hc.c)+' °C':'—',hc?'hottest card ('+hc.id+')':'cards');
+    p.appendChild(mini);
+    if(cards.length){p.appendChild(txt('div','Cards','hwsec'));
+      p.appendChild(tbl(['Card','Temp','Stop / slowdown','Room left','Power','Load'],cards.map(c=>{const stop=cardStop(c);const l=lvl(c.c,stop-8,stop);
+        if(l==='b')issues.push(['b',`${sh}: ${c.id} at ${f0(c.c)} °C (stop ${stop} °C)`]);else if(l==='w')issues.push(['w',`${sh}: ${c.id} at ${f0(c.c)} °C, only ${f0(stop-c.c)} °C below ${stop} °C`]);
+        return [c.id+(c.stale?' (no fresh reading)':''),c.c==null?'—':f0(c.c)+' °C',stop+' °C'+(c.vendor==='Intel'?' (watchdog)':''),hbar(c.c||0,stop,l),c.w==null?'—':`${f0(c.w)} of ${f0(c.limitW)} W`,c.util==null?'—':f0(c.util)+'%'];})));}
+    if(zones.length&&hc&&hc.c!=null){const zp=Math.max(...zones.map(z=>z.pct));if(zp<=40&&hc.c>=cardStop(hc)-15)issues.push(['b',`${sh}: fans held at ${f0(zp)}% while ${hc.id} is at ${f0(hc.c)} °C`]);}
+    p.appendChild(txt('div','Hottest server sensors (from the BMC)','hwsec'));
+    p.appendChild(tbl(['Sensor','Now','Warn','Critical',''],temps.filter(t=>!/inlet|ambient/i.test(t.name)).slice(0,6).map(t=>{const l=lvl(t.c,t.warn,t.crit);
+      if(l==='b')issues.push(['b',`${sh}: ${t.name} at ${f0(t.c)} °C, at or above its critical limit ${f0(t.crit)} °C`]);else if(l==='w')issues.push(['w',`${sh}: ${t.name} at ${f0(t.c)} °C, above its warning limit ${f0(t.warn)} °C`]);
+      return [t.name,f0(t.c)+' °C',t.warn==null?'—':f0(t.warn)+' °C',t.crit==null?'—':f0(t.crit)+' °C',hbar(t.c,t.crit||100,l)];})));
+    if((n.blind||[]).length){p.appendChild(txt('p',`The BMC cannot read: ${n.blind.join(', ')}. Its fan control does not see those parts.`,'small'));issues.push(['w',`${sh}: BMC has no reading for ${n.blind.length} card-slot sensors (${n.blind.slice(0,3).join(', ')}…)`]);}
+    if(fans.length){p.appendChild(txt('div','Fans','hwsec'));
+      p.appendChild(txt('div',`${fans.length} fan rotors, ${f0(Math.min(...rpm))}–${f0(Math.max(...rpm))} RPM`+(zones.length?` · fan control ${zones.map(z=>z.name.replace(/_/g,' ')+' '+f0(z.pct)+'%').join(', ')}`:' · this server reports RPM only')+(fans.some(f=>f.status&&!/ok/i.test(f.status))?' · a fan reports a problem':''),'small'));}
+    const nics=(n.nics||[]).filter(x=>x.state==='up'||x.default);
+    if(nics.length){p.appendChild(txt('div','Network cards in use','hwsec'));
+      p.appendChild(tbl(['Port','Speed','Errors','Drops','Card'],nics.map(x=>{const e=x.rxErr+x.txErr+x.crc;if(e>0)issues.push(['w',`${sh}: ${x.name} has ${fmtN(e)} errors`]);
+        return [x.name+(x.default?' (cluster traffic)':''),x.speed>0?(x.speed>=1000?fmtN(x.speed/1000)+' Gb/s':x.speed+' Mb/s'):'—',fmtN(e),fmtN(x.rxDrop+x.txDrop),(x.desc||'').replace(/^.*?: /,'').slice(0,48)];})));}
+    const ch=(n.chips||[]).filter(c=>!/nvme/i.test(c.chip));
+    if(ch.length){const d=document.createElement('details');d.className='hw';d.appendChild(txt('summary',`Chip temperatures from Linux drivers (${ch.length})`));
+      d.appendChild(txt('pre',ch.map(c=>`${c.chip} ${c.dev} ${c.label}: ${f0(c.c)} °C${c.max?' max '+f0(c.max):''}${c.crit?' crit '+f0(c.crit):''}`).join('\n')));p.appendChild(d);}
+    const k=n.kernel||{};const d2=document.createElement('details');d2.className='hw';d2.appendChild(txt('summary',`Kernel warnings since boot about cards, PCIe or heat: ${k.count==null?'—':k.count}`));
+    d2.appendChild(txt('pre',(k.last||[]).join('\n')||'none'));p.appendChild(d2);
+    const d3=document.createElement('details');d3.className='hw';d3.appendChild(txt('summary','Latest BMC events'));d3.appendChild(txt('pre',(n.sel||[]).join('\n')||'none'));p.appendChild(d3);
+  });
+  (HWD.watchdog||[]).slice(-2).forEach(w=>issues.push(['w',w]));
+  const order={b:0,w:1};issues.sort((a,b)=>order[a[0]]-order[b[0]]);
+  const worst=issues.length?issues[0][0]:'';
+  st.className='pill '+(worst==='b'?'p-bad':worst==='w'?'p-warn':'p-ok');st.textContent=worst==='b'?'Needs attention':worst==='w'?'Warnings':'All normal';
+  issues.slice(0,8).forEach(([l,t])=>{const li=txt('li',t);if(l==='b')li.className='bad-t';iss.appendChild(li);});
+  drawHWCharts();drawHeat();
+}
+function drawHWCharts(){
+  const S2=HWD.series||{},sers=Object.keys(S2);const nm=k=>k.split(':')[0];
+  const nvC=['var(--nv)','color-mix(in srgb,var(--nv) 55%,var(--ink))'],gdC=['var(--gd)','color-mix(in srgb,var(--gd) 55%,var(--ink))'];
+  const g=(HWD.gaudi||[]);const temp=[];
+  sers.filter(k=>k.includes(':card:')).sort().forEach((k,i)=>temp.push({name:k.split(':card:')[1],color:nvC[i%2],pts:S2[k]}));
+  sers.filter(k=>k.startsWith('gaudi:')).sort().forEach((k,i)=>{const s=k.slice(6);const gg=g.find(x=>x.serial===s);temp.push({name:gg?gg.id:'Gaudi '+s,color:gdC[i%2],pts:S2[k]});});
+  const nodeColor=k=>HWD.gaudiNode&&HWD.gaudiNode.split('.')[0]===nm(k)?'var(--gd)':'var(--nv)';
+  const per=suf=>sers.filter(k=>k.endsWith(':'+suf)).sort().map(k=>({name:nm(k),color:nodeColor(k),pts:S2[k]}));
+  const wins=((HWD.heat||{}).windows||[]);
+  lineChart('chTemp','lgTemp',temp,{unit:'°C',refs:[{v:80,label:'Gaudi stop 80 °C'}],yMin:20,wins});
+  lineChart('chPow','lgPow',per('power'),{unit:'W',yMin:0,wins});
+  lineChart('chFan','lgFan',per('fanrpm'),{unit:'RPM',yMin:0,wins});
+  lineChart('chZone','lgZone',per('fanpct'),{unit:'%',yMin:0,yMax:100,wins,empty:'Only the Gaudi server reports a fan setting in percent.'});
+}
+function lineChart(id,lg,series,o){
+  const el=$(id),L=$(lg);el.replaceChildren();L.replaceChildren();
+  series=series.filter(s=>s.pts&&s.pts.length);
+  if(!series.length){el.appendChild(txt('p',o.empty||'No readings yet.','small muted'));return;}
+  if(series.length>1)series.forEach(s=>{const sp=document.createElement('span');const i=document.createElement('i');i.style.background=s.color;sp.append(i,s.name);L.appendChild(sp);});
+  const W=Math.max(300,el.clientWidth||460),H=190,ml=44,mr=96,mt=10,mb=24;const now=Date.now()/1000,t0=now-3600;
+  let lo=Infinity,hi=-Infinity;series.forEach(s=>s.pts.forEach(p=>{lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1]);}));(o.refs||[]).forEach(r=>{hi=Math.max(hi,r.v);});
+  if(o.yMin!=null)lo=Math.min(lo,o.yMin);if(o.yMax!=null)hi=Math.max(hi,o.yMax);if(hi-lo<1)hi=lo+1;
+  const steps=[1,2,5,10,20,25,50,100,200,250,500,1000,2000,2500,5000,10000];const step=steps.find(st=>(hi-lo)/st<=5)||20000;
+  lo=Math.floor(lo/step)*step;hi=Math.ceil(hi/step)*step;
+  const X=t=>ml+(t-t0)/3600*(W-ml-mr),Y=v=>mt+(1-(v-lo)/(hi-lo))*(H-mt-mb);
+  const NS='http://www.w3.org/2000/svg';const sv=document.createElementNS(NS,'svg');sv.setAttribute('viewBox',`0 0 ${W} ${H}`);sv.setAttribute('role','img');
+  sv.setAttribute('aria-label',series.map(s=>`${s.name} now ${f0(s.pts[s.pts.length-1][1])} ${o.unit}`).join('; '));
+  const el2=(tag,a,t)=>{const e=document.createElementNS(NS,tag);for(const k in a)e.setAttribute(k,a[k]);if(t!=null)e.textContent=t;sv.appendChild(e);return e;};
+  (o.wins||[]).forEach(w=>{const a=Math.max(t0,w.start),b=w.end||now;if(b<t0)return;el2('rect',{x:X(a),y:mt,width:Math.max(1,X(b)-X(a)),height:H-mt-mb,fill:'var(--accent-soft)'});const lx=X(a)>W-mr-70;el2('text',{x:lx?X(a)-3:X(a)+3,y:mt+11,'font-size':10,'text-anchor':lx?'end':'start',fill:'var(--accent)'},'heat test: '+({a30:'A30',gaudi:'Gaudi',both:'A30 + Gaudi'}[w.target]||w.target));});
+  for(let v=lo;v<=hi+1e-9;v+=step){el2('line',{x1:ml,x2:W-mr,y1:Y(v),y2:Y(v),stroke:'var(--grid)'});el2('text',{x:ml-6,y:Y(v)+4,'text-anchor':'end','font-size':11,fill:'var(--muted)'},fmtN(v));}
+  for(let m=0;m<=60;m+=15){const t=t0+m*60;el2('text',{x:X(t),y:H-6,'text-anchor':'middle','font-size':11,fill:'var(--muted)'},m===60?'now':new Date(t*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));}
+  (o.refs||[]).forEach(r=>{if(r.v<lo||r.v>hi)return;el2('line',{x1:ml,x2:W-mr,y1:Y(r.v),y2:Y(r.v),stroke:'var(--bad)','stroke-dasharray':'4 4','stroke-width':1.5});el2('text',{x:ml+4,y:Y(r.v)-4,'font-size':11,fill:'var(--bad)'},r.label);});
+  const ends=[];
+  series.forEach(s=>{const pts=s.pts.filter(p=>p[0]>=t0);if(!pts.length)return;let d='';let prev=null;
+    pts.forEach(p=>{d+=(prev&&p[0]-prev[0]<90?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);prev=p;});
+    el2('path',{d,fill:'none',stroke:s.color,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'});
+    const lp=pts[pts.length-1];el2('circle',{cx:X(lp[0]),cy:Y(lp[1]),r:4,fill:s.color,stroke:'var(--surface)','stroke-width':2});ends.push({y:Y(lp[1]),s,v:lp[1]});});
+  ends.sort((a,b)=>a.y-b.y);for(let i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<13)ends[i].y=ends[i-1].y+13;
+  ends.forEach(e=>el2('text',{x:W-mr+8,y:e.y+4,'font-size':11,fill:'var(--ink)'},`${series.length>1?e.s.name+' ':''}${f0(e.v)}`));
+  const cross=el2('line',{y1:mt,y2:H-mb,stroke:'var(--muted)','stroke-width':1,visibility:'hidden'});
+  const tip=document.createElement('div');tip.className='tip';tip.hidden=true;el.append(sv,tip);
+  sv.addEventListener('pointermove',e=>{const r=sv.getBoundingClientRect();const x=(e.clientX-r.left)*W/r.width;if(x<ml||x>W-mr){cross.setAttribute('visibility','hidden');tip.hidden=true;return;}
+    const t=t0+(x-ml)/(W-ml-mr)*3600;cross.setAttribute('x1',x);cross.setAttribute('x2',x);cross.setAttribute('visibility','visible');
+    tip.replaceChildren(txt('b',new Date(t*1000).toLocaleTimeString()));
+    series.forEach(s=>{let best=null;s.pts.forEach(p=>{if(!best||Math.abs(p[0]-t)<Math.abs(best[0]-t))best=p;});if(best&&Math.abs(best[0]-t)<90){const d=document.createElement('div');const i=document.createElement('i');i.style.cssText=`display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;background:${s.color}`;d.append(i,`${s.name}: ${f0(best[1])} ${o.unit}`);tip.appendChild(d);}});
+    tip.hidden=false;tip.style.left=Math.min(e.clientX-r.left+12,r.width-170)+'px';tip.style.top='8px';});
+  sv.addEventListener('pointerleave',()=>{cross.setAttribute('visibility','hidden');tip.hidden=true;});
+}
+
+// ---------- the stack ----------
+const SNAPSHOT={snapshot:'Oct 28, 2026',cluster:{openshift:'4.22.18',kubernetes:'v1.35'},
+ router:{image:'llm-d-router-endpoint-picker:hetero-pd-dev',configFile:'/config/auto-pd-config.yaml',proxy:'envoyproxy/envoy:distroless-v1.33.2'},
+ nodes:[{short:'worker1',ready:true,machine:'PowerEdge-R750',cpu:'64',memory:'251Gi',os:'Red Hat Enterprise Linux CoreOS 9.8',kernel:'5.14.0-687.55.1.el9_8.x86_64',runtime:'cri-o',
+   gpus:[{vendor:'NVIDIA',product:'NVIDIA A30',count:2,healthy:2,memoryMiB:24576,driver:'595.91.07',runtime:'CUDA 13.2'}]},
+  {short:'worker2',ready:true,machine:'QuantaGrid D55Q-2U',cpu:'256',memory:'503Gi',os:'Red Hat Enterprise Linux CoreOS 9.8',kernel:'5.14.0-687.55.1.el9_8.x86_64',runtime:'cri-o',
+   gpus:[{vendor:'Intel',product:'Intel GAUDI3 HL-338',count:2,healthy:0,memoryMiB:131072,driver:'1.24.2',runtime:'firmware hl-gaudi3-1.24.0-fw-62.6.1'}]}],
+ pods:[{node:'worker1',role:'prefill',cls:'nvidia-a30',image:'docker.io/vllm/vllm-openai:v0.26.0',vllmVersion:'0.26.0',model:'Qwen/Qwen2.5-7B-Instruct',maxModelLen:8192,ready:true},
+  {node:'worker1',role:'decode',cls:'nvidia-a30',image:'docker.io/vllm/vllm-openai:v0.26.0',vllmVersion:'0.26.0',model:'Qwen/Qwen2.5-7B-Instruct',maxModelLen:8192,ready:true,sidecar:'ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0'}],
+ model:{id:'Qwen/Qwen2.5-7B-Instruct'}};
+let INVD=null,invT=0;
+function loadInv(){if(!online){INVD=null;drawStack();return;}if(Date.now()-invT<25000&&INVD)return;invT=Date.now();
+  api('api/inventory').then(j=>{INVD=j;drawStack();}).catch(()=>{INVD=null;drawStack();});}
+const rot={y:-28,x:-18};let dragging=null;
+const sc=$('scene');
+sc.addEventListener('pointerdown',e=>{dragging={x:e.clientX,y:e.clientY,ry:rot.y,rx:rot.x};sc.setPointerCapture(e.pointerId);});
+sc.addEventListener('pointermove',e=>{if(!dragging)return;rot.y=dragging.ry+(e.clientX-dragging.x)*0.35;rot.x=Math.max(-60,Math.min(5,dragging.rx-(e.clientY-dragging.y)*0.25));applyRot();});
+sc.addEventListener('pointerup',()=>dragging=null);sc.addEventListener('pointercancel',()=>dragging=null);
+sc.addEventListener('dblclick',()=>{rot.y=-28;rot.x=-18;applyRot();});
+let scaleK=1;
+function applyRot(){$('world').style.transform=`scale(${scaleK}) rotateX(${rot.x}deg) rotateY(${rot.y}deg)`;}
+function face(cls,w,h,tf,html){const f=document.createElement('div');f.className='face '+(cls||'');f.style.width=w+'px';f.style.height=h+'px';f.style.transform=tf;if(html)f.append(...html);return f;}
+function txt(tag,t,cls){const e=document.createElement(tag);e.textContent=t;if(cls)e.className=cls;return e;}
+// cuboid centred on (x,y,z); y grows downward in CSS, so "up" is negative y
+function cuboid(cls,x,y,z,w,h,d,front,top,side){
+  const b=document.createElement('div');b.className='box '+cls;b.style.transform=`translate3d(${x}px,${y}px,${z}px)`;
+  const at=(fw,fh,t)=>`translate(${-fw/2}px,${-fh/2}px) ${t}`;
+  b.append(face('front big',w,h,at(w,h,`translateZ(${d/2}px)`),front),face('back',w,h,at(w,h,`rotateY(180deg) translateZ(${d/2}px)`)),
+    face('right',d,h,at(d,h,`rotateY(90deg) translateZ(${w/2}px)`),side),face('left',d,h,at(d,h,`rotateY(-90deg) translateZ(${w/2}px)`)),
+    face('top',w,d,at(w,d,`rotateX(90deg) translateZ(${h/2}px)`),top),face('bottom',w,d,at(w,d,`rotateX(-90deg) translateZ(${h/2}px)`)));
+  return b;}
+const short=img=>img?img.split('/').pop():'—';
+const cardName=p=>/gaudi\s*3|gaudi3/i.test(p||'')?'Intel Gaudi 3':(p||'GPU').replace(/^NVIDIA /,'NVIDIA ');
+function drawStack(){
+  const D=INVD&&INVD.nodes&&INVD.nodes.length?INVD:SNAPSHOT;const live=D!==SNAPSHOT;
+  $('stackSrc').textContent=live?'Read live from the cluster.':`Snapshot from ${SNAPSHOT.snapshot}; open the dashboard from the cluster to see it live.`;
+  const w=$('world');w.replaceChildren();
+  const nodes=D.nodes.filter(n=>n.gpus&&n.gpus.length);const SW=430,SD=250,SH=90,GAP=120;
+  const total=nodes.length*SW+(nodes.length-1)*GAP;
+  nodes.forEach((n,i)=>{const cx=-total/2+SW/2+i*(SW+GAP);
+    const g=n.gpus[0];const gb=g.memoryMiB?Math.round(g.memoryMiB/1024)+' GB':'';
+    w.appendChild(cuboid('srv',cx,0,0,SW,SH,SD,[txt('b',`Server ${n.short}`),txt('span',`${n.machine||''} · ${n.cpu||'?'} CPU cores · ${(n.memory||'').replace('Ki','').replace('Gi',' GB')} memory`,'s'),txt('span',`${n.os||''} · OpenShift ${D.cluster.openshift||''}`,'s')],null,[txt('span',n.ready?'online':'offline','s')]));
+    const count=Math.max(1,g.count||1);const cw=Math.min(150,(SW-40)/count-16);
+    for(let k=0;k<count;k++){const x=cx-SW/2+20+cw/2+k*((SW-40)/count);const down=k>=(g.healthy||0);
+      const cls=down?'card-down':g.vendor==='NVIDIA'?'card-nv':'card-gd';
+      w.appendChild(cuboid(cls,x,-12,10,cw,70,22,[txt('b',`${cardName(g.product)} #${k+1}`),txt('span',(gb?gb+' memory · ':'')+(down?'DOWN':'healthy'),'s')]));}
+    // driver layer spans the server
+    w.appendChild(cuboid('layer-drv',cx,-SH/2-46,0,SW-30,30,SD-60,[txt('b',`Driver: ${g.vendor} ${g.driver||'?'}`),txt('span',g.runtime||'','s')]));
+    // pods on this node, one tower per card
+    const pods=(D.pods||[]).filter(p=>p.node&&(p.node===n.name||p.node===n.short||(p.node||'').startsWith(n.short+'.')||p.node===n.short)).sort((a,b)=>(a.role==='prefill'?0:1)-(b.role==='prefill'?0:1));
+    pods.forEach((p,k)=>{const x=cx-SW/2+20+cw/2+k*((SW-40)/count);
+      const job=p.role==='prefill'?'reads prompts':'writes answers';
+      w.appendChild(cuboid('layer-rt',x,-SH/2-118,0,cw+8,56,110,[txt('b',`vLLM ${p.vllmVersion||'?'}`),txt('span',job+(p.role==='decode'?' · + llm-d sidecar':''),'s'),txt('span',short(p.image),'s')]));
+      const mm=(p.model||D.model.id||'').split('/').pop();
+      w.appendChild(cuboid('layer-model',x,-SH/2-196,0,cw+8,56,110,[txt('b',mm),txt('span',`bf16 · ${p.maxModelLen?fmtN(p.maxModelLen)+'-token context':''}`,'s'),txt('span',p.ready?'serving':'starting','s')]));});
+  });
+  // router in front, centred
+  const r=D.router||{};const mode=/auto|guarded|hetero/.test(r.configFile||'')?'your plugin':(r.configFile||'').includes('stock')?'stock rule':(r.configFile||'').includes('always')?'test mode':'';
+  w.appendChild(cuboid('layer-router',0,10,SD/2+150,330,64,70,[txt('b','llm-d router + your plugin'),txt('span',`${short(r.image)} · deciding with: ${mode||'?'}`,'s'),txt('span','every request enters here','s')]));
+  const box=$('scene').getBoundingClientRect();scaleK=Math.min(1,box.width/(total+260));applyRot();
+  drawParts(D,live);
+}
+function dlist(pairs){const dl=document.createElement('dl');pairs.forEach(([a,b])=>{if(b==null||b==='')return;dl.append(txt('dt',a),txt('dd',String(b)));});return dl;}
+function drawParts(D,live){
+  const pw=$('parts');pw.replaceChildren();
+  (D.nodes||[]).filter(n=>n.gpus&&n.gpus.length).forEach(n=>{const g=n.gpus[0];const p=document.createElement('div');p.className='panel';
+    p.append(txt('h3',`Server ${n.short}`),dlist([['What it is',n.machine],['GPU cards',`${g.count} × ${cardName(g.product)}${g.memoryMiB?', '+Math.round(g.memoryMiB/1024)+' GB each':''}`],['Cards working',`${g.healthy} of ${g.count}`],['Card driver',`${g.vendor} ${g.driver||'?'}`],['Card runtime',g.runtime],['Operating system',n.os],['Linux kernel',n.kernel],['Container runtime',n.runtime],['Platform',`OpenShift ${D.cluster.openshift||'?'} (Kubernetes ${D.cluster.kubernetes||'?'})`],['CPU and memory',`${n.cpu} cores, ${(n.memory||'').replace('Ki',' KiB').replace('Gi',' GB')}`]]));pw.appendChild(p);});
+  (D.pods||[]).forEach(q=>{const p=document.createElement('div');p.className='panel';
+    p.append(txt('h3',`vLLM server: ${q.role==='prefill'?'reads prompts (prefill)':'writes answers (decode)'}`),dlist([['Runs on',q.node],['Inference engine',`vLLM ${q.vllmVersion||'?'}`],['Container image',q.image],['Helper',q.sidecar?`llm-d routing sidecar (${short(q.sidecar)})`:null],['Model',q.model],['Context window',q.maxModelLen?fmtN(q.maxModelLen)+' tokens':null],['Card class',q.cls],['Status',q.ready?'serving':'starting']]));pw.appendChild(p);});
+  const r=D.router||{};const rp=document.createElement('div');rp.className='panel';
+  rp.append(txt('h3','Router'),dlist([['Software','llm-d router (endpoint picker) with hetero-pd-decider built in'],['Image',r.image],['Decision config',r.configFile],['Front proxy',r.proxy?short(r.proxy):null]]));pw.appendChild(rp);
+  const m=D.model||{};const mp=document.createElement('div');mp.className='panel';
+  const files=(m.files||[]);const gb=x=>x?(x/1e9).toFixed(2)+' GB':'';
+  mp.append(txt('h3',`AI model: ${m.id||'?'}`),dlist([['Parameters',m.params?(m.params/1e9).toFixed(1)+' billion':'about 7.6 billion'],['Precision','bf16 (2 bytes per weight)'],['Weight files',files.length?`${files.filter(f=>f.name.endsWith('.safetensors')).length} safetensors shards, ${gb(files.filter(f=>f.name.endsWith('.safetensors')).reduce((a,f)=>a+(f.size||0),0))}`:'4 safetensors shards, about 15 GB'],['Tokenizer',files.length?files.filter(f=>/token|vocab|merges/.test(f.name)).map(f=>f.name).join(', '):'tokenizer.json, vocab.json, merges.txt'],['License',m.license]]));
+  if(files.length){const ul=document.createElement('ul');ul.className='files';files.forEach(f=>{const li=document.createElement('li');li.textContent=f.name+(f.size?` (${gb(f.size)})`:'');ul.appendChild(li);});mp.appendChild(txt('div','All files in the model repository:','small muted'));mp.appendChild(ul);}
+  pw.appendChild(mp);
+}
+window.addEventListener('resize',()=>{if(!$('stack').hidden){drawStack();if(HWD)drawHWCharts();}});
+function nice(p){const c=(p.cls||'').includes('gaudi')?'Intel Gaudi':(p.cls||'').includes('a30')?'NVIDIA A30':(p.cls||'Card');return c+(p.role==='prefill'?' · reads prompts':' · writes answers');}
+function td(tr,t){const c=document.createElement('td');c.textContent=t;tr.appendChild(c);}
+function drawLive(){
+  document.querySelectorAll('[data-offline]').forEach(e=>e.hidden=online);
+  const m=S&&S.mode||{},running=!!(S&&S.traffic&&S.traffic.running);
+  document.querySelectorAll('[data-modename]').forEach(e=>e.textContent=online?(MODE_NAME[m.current]||'—'):'—');
+  document.querySelectorAll('[data-modestate]').forEach(e=>{e.hidden=!online;e.className='pill '+(m.ready?'p-ok':'p-warn');e.textContent=m.ready?'Ready':'Restarting…';});
+  $('optHetero').classList.toggle('current',online&&isPlug(m.current));$('optStock').classList.toggle('current',online&&m.current==='stock');
+  document.querySelectorAll('[data-mode]').forEach(b=>{b.disabled=!online||running||!m.ready||m.current===b.dataset.mode;b.textContent=m.current===b.dataset.mode?'In use':b.dataset.label;});
+  $('startBtn').disabled=!online||running||!m.ready||!!(S&&S.suite&&S.suite.running);$('stopBtn').disabled=!online||!(running||(S&&S.suite&&S.suite.running));
+  if(!online||!S){drawSuite();return;}
+  drawSuite();
+  const T=S.traffic,TT=S.trafficTotal;
+  if(T&&T.running){const now=Date.now()/1000,frac=Math.min(1,(now-T.startedAt)/(T.endsAt-T.startedAt));$('tProg').hidden=false;$('tProg').firstElementChild.style.width=(frac*100)+'%';
+    $('tStatus').textContent=`Running: ${T.users} chat users, ${T.docsPerSec} documents per second, ${Math.max(0,Math.round(T.endsAt-now))} s left. ${fmtN(TT.chatDone)} chat replies and ${fmtN(TT.docDone)} documents done${TT.errors?', '+TT.errors+' errors':''}.`;}
+  else{$('tProg').hidden=true;$('tStatus').textContent=TT?`Last run finished: ${fmtN(TT.chatDone)} chat replies, ${fmtN(TT.docDone)} documents${TT.errors?', '+TT.errors+' errors':''}.`:'No traffic running.';}
+  if(TT&&TT.lastError&&TT.errors)$('tErr').textContent='Last error: '+TT.lastError;
+  const r=S.live&&S.live.rate||{moved:0,kept:0};$('vMoved').textContent=fmtN(r.moved);$('vKept').textContent=fmtN(r.kept);
+  const tot=r.moved+r.kept;const sp=$('vSplit');sp.children[0].style.flex=tot?r.moved:0;sp.children[1].style.flex=tot?r.kept:1;
+  const show=T&&T.running?T:null;
+  $('m1').textContent=show?secs(show.chatTtftP95):'—';$('m2').textContent=show?secs(show.chatItlP95):'—';$('m3').textContent=show?secs(show.docTtftP50):'—';$('m4').textContent=show?fmtN(show.tokensPerSec):'—';
+  const pc=$('podCards');pc.replaceChildren();
+  ((S.live&&S.live.pods)||[]).forEach(p=>{const c=document.createElement('div');c.className='tile';const b=document.createElement('b');b.textContent=nice(p);
+    const st=document.createElement('div');st.style.margin='6px 0';const pl=document.createElement('span');pl.className='pill '+(p.up?'p-ok':'p-bad');pl.textContent=p.up?'Up':'Not responding';st.appendChild(pl);
+    const v=document.createElement('div');v.className='v num';v.textContent=fmtN(p.running);const l=document.createElement('div');l.className='l';l.textContent=`users being served · ${fmtN(p.waiting)} waiting · memory ${Math.round(100*p.kv)}%`;
+    c.append(b,st,v,l);pc.appendChild(c);});
+  const tb=$('runs').tBodies[0];tb.replaceChildren();
+  (S.history||[]).forEach(h=>{const tr=document.createElement('tr');const mv=h.moved+h.kept?Math.round(100*h.moved/(h.moved+h.kept))+'%':'—';
+    const ct=h.chatPromptTokens||h.chatTokens,dt=h.docPromptTokens||h.docTokens;[MODE_NAME[h.mode]||h.mode,SCN_NAME[h.scenario]||'manual',h.users?h.users+' × '+(ct?fmtN(Math.round(ct)):'~250'):'—',h.docsPerSec?h.docsPerSec+' × '+(dt?fmtN(Math.round(dt)):'~650'):'—',secs(h.chatTtftP95),secs(h.chatItlP95),secs(h.docTtftP50),mv,fmtN(h.tokensPerSec),h.errors].forEach(x=>td(tr,String(x)));
+    const o=(h.mode==='stock'||isPlug(h.mode))?twin(h,S.history):null;winnerCell(tr,o?(isPlug(h.mode)?verdict(o,h):verdict(h,o)):null);tb.appendChild(tr);});
+  if(!(S.history||[]).length){const tr=document.createElement('tr');const c=document.createElement('td');c.colSpan=11;c.className='muted';c.textContent='No finished runs yet.';tr.appendChild(c);tb.appendChild(tr);}
+}
+
+
+// ---------- measured value (from Traffic runs) ----------
+// Last results recorded in this chat, shown when the page is not served from the cluster.
+// ---------- value: outcome of the latest test suite ----------
+const MOMENT={'busy-chat':'Peak hours, chat only','busy-medium':'Peak hours, chat + medium documents','busy-long':'Peak hours, chat + long documents',
+  'idle-long':'Quiet hours, documents only','busy-huge':'Peak hours, chat + very long reports','light-chat':'Light chat'};
+const PHRASE={tokensPerSec:['more total output','less total output'],chatItlP95:['smoother chat streaming','choppier chat streaming'],
+  chatTtftP95:['faster chat replies','slower chat replies'],docTtftP50:['faster document responses','slower document responses']};
+const SUITE_SNAPSHOT=null;   // filled from the exported results, shown when the page is opened off the cluster
+function latestSuite(H,want){
+  const plug=H.filter(h=>isPlug(h.mode)&&h.scenario&&(!want||h.mode===want));if(!plug.length)return null;
+  const newest=plug.reduce((a,b)=>b.startedAt>a.startedAt?b:a);const vm=newest.mode;
+  // Only the newest suite: by suite id when runs carry one, otherwise the newest stretch of
+  // suite runs (stock and plugin) with no gap over 15 minutes between consecutive runs.
+  let P,St;
+  if(newest.suite!=null){P=plug.filter(h=>h.mode===vm&&h.suite===newest.suite);St=H.filter(h=>h.mode==='stock'&&h.scenario&&h.suite===newest.suite);}
+  else{const seq=H.filter(h=>h.scenario&&(h.mode==='stock'||h.mode===vm)&&h.suite==null).sort((a,b)=>b.startedAt-a.startedAt);
+    let i=seq.indexOf(newest);const keep=[seq[i]];while(i+1<seq.length&&seq[i].startedAt-seq[i+1].startedAt<900){i++;keep.push(seq[i]);}
+    const lo=Math.min(...keep.map(h=>h.startedAt)),hi=Math.max(...keep.map(h=>h.startedAt));
+    const inWin=h=>h.startedAt>=lo&&h.startedAt<=hi+900;
+    P=keep.filter(h=>h.mode===vm);St=seq.filter(h=>h.mode==='stock'&&inWin(h));}
+  const M=a=>Object.fromEntries(METRICS.map(([k])=>[k,med(a.map(x=>x[k]))]).concat([['errors',a.reduce((s,x)=>s+(x.errors||0),0)],['movedShare',med(a.map(share))]]));
+  const rows=[];SCN.forEach(([id])=>{const st=St.filter(h=>h.scenario===id),pl=P.filter(h=>h.scenario===id);if(!st.length||!pl.length)return;
+    const A=M(st),B=M(pl),v=verdict(A,B);
+    rows.push({id,A,B,v,same:!!v.same,n:st.length+pl.length,reps:Math.min(st.length,pl.length)});});
+  if(!rows.length)return null;
+  return {vm,rows,P,St,t0:Math.min(...P.concat(St).map(h=>h.startedAt)),t1:Math.max(...P.concat(St).map(h=>h.startedAt)),minutes:P[0].minutes};
+}
+function change(A,B,k){const a=A[k],b=B[k];if(!a||!b)return null;const lower=METRICS.find(m=>m[0]===k)[1];const c=b/a-1;return {c,good:lower?c<0:c>0,pct:Math.round(100*Math.abs(lower?1-b/a:c))};}
+function headline(r){
+  const ch=METRICS.map(([k])=>({k,...(change(r.A,r.B,k)||{})})).filter(x=>x.c!=null&&Math.abs(x.c)>=0.03);
+  const want=r.v.w==='plugin'?ch.filter(x=>x.good):r.v.w==='stock'?ch.filter(x=>!x.good):[];
+  if(r.same)return {text:'Same decisions as stock (it moved the same requests), so the small differences are run-to-run noise'};
+  if(!want.length&&r.v.w==='tie'&&ch.length){const g=ch.filter(x=>x.good).sort((a,b)=>b.pct-a.pct)[0],bd=ch.filter(x=>!x.good).sort((a,b)=>b.pct-a.pct)[0];
+    if(g&&bd)return {text:`Trade-off: ${g.pct}% ${PHRASE[g.k][0]}, but ${bd.pct}% ${PHRASE[bd.k][1]}`};}
+  if(!want.length)return {text:'Same as stock: all four numbers within 3%'};
+  const top=want.reduce((a,b)=>b.pct>a.pct?b:a);const lower=METRICS.find(m=>m[0]===top.k)[1];
+  const fmt=top.k==='tokensPerSec'?x=>fmtN(x)+' tok/s':secs;
+  const other=ch.filter(x=>x.good!==top.good);const t2=other.length?other.reduce((a,b)=>b.pct>a.pct?b:a):null;
+  return {text:`${top.pct}% ${PHRASE[top.k][top.good?0:1]} (${fmt(r.A[top.k])} → ${fmt(r.B[top.k])})`+(t2?`; but ${t2.pct}% ${PHRASE[t2.k][t2.good?0:1]}`:''),top};
+}
+function drawMeasured(){
+  drawValue();
+  const live=online&&S&&S.history&&S.history.length?latestSuite(S.history):null;
+  const D=live||(SUITE_SNAPSHOT?latestSuite(SUITE_SNAPSHOT):null);
+  $('vEmpty').hidden=!!D;$('vBody').hidden=!D;if(!D)return;
+  const R=D.rows,win=R.filter(r=>r.v.w==='plugin'),tie=R.filter(r=>r.v.w==='tie'),loss=R.filter(r=>r.v.w==='stock');
+  const nm=r=>MOMENT[r.id]||SCN_NAME[r.id];
+  const d0=new Date(D.t0*1000);
+  $('vWhen').textContent=`Latest test suite · ${d0.toLocaleDateString('en',{month:'short',day:'numeric',year:'numeric'})} · ${R.length} scenarios · ${R.reduce((s,r)=>s+r.n,0)} runs · ${PLUGIN_MODES[D.vm]} vs stock llm-d`+(live?'':' · saved snapshot');
+  $('vHead').textContent=loss.length===0
+    ?(win.length?`Your plugin beat stock llm-d in ${win.length} of ${R.length} scenarios and was never worse.`:`Your plugin matched stock llm-d in all ${R.length} scenarios.`)
+    :`Your plugin won ${win.length}, tied ${tie.length} and lost ${loss.length} of ${R.length} scenarios against stock llm-d.`;
+  $('vSub').textContent=loss.length===0
+    ?'Safe to leave on: where it did not win, it made the same calls as stock and the results were within 3%.'
+    :`Where it lost: ${loss.map(nm).join('; ')}. Fix those before turning it on in production.`;
+  const sc=$('vScore');sc.replaceChildren();[['s-win',`Won ${win.length}`],['s-tie',`Tied ${tie.length}`],['s-loss',`Lost ${loss.length}`]].forEach(([c,t])=>{const e=document.createElement('span');e.className=c;e.textContent=t;sc.appendChild(e);});
+  // KPIs
+  const best=win.map(r=>({r,h:headline(r)})).filter(x=>x.h.top).sort((a,b)=>b.h.top.pct-a.h.top.pct)[0];
+  const outs=R.map(r=>r.A.tokensPerSec&&r.B.tokensPerSec?r.B.tokensPerSec/r.A.tokensPerSec-1:null).filter(x=>x!=null),mo=med(outs);
+  const worst=R.map(r=>METRICS.map(([k])=>change(r.A,r.B,k)).filter(x=>x&&!x.good)).flat().reduce((a,b)=>!a||b.pct>a.pct?b:a,null);
+  const K=$('vKpis');K.replaceChildren();
+  const kpi=(v,l,d,cls)=>{const e=document.createElement('div');e.className='kpi';const a=document.createElement('div');a.className='v num';a.textContent=v;if(cls)a.style.color=cls;const b=document.createElement('div');b.className='l';b.textContent=l;const c=document.createElement('div');c.className='d';c.textContent=d;e.append(a,b,c);K.appendChild(e);};
+  if(best)kpi(best.h.top.pct+'%',`${PHRASE[best.h.top.k][0]}`,`${nm(best.r)}, ${secs(best.r.A[best.h.top.k])} → ${secs(best.r.B[best.h.top.k])}.`);
+  else kpi('—','no clear win yet','No scenario improved by 3% or more.');
+  kpi(String(loss.length),loss.length===1?'scenario worse than stock':'scenarios worse than stock',loss.length?loss.map(nm).join('; '):'Every other scenario matched stock.',loss.length?'var(--bad)':'var(--ok)');
+  kpi(mo==null?'—':(mo>=0?'+':'')+(mo*100).toFixed(1)+'%','total output vs stock',Math.abs(mo||0)<0.01?'Same hardware throughput: the gain today is response time, not capacity.':'Median across scenarios.');
+  // points
+  const ul=$('vPoints');ul.replaceChildren();const li=t=>{const e=document.createElement('li');e.textContent=t;ul.appendChild(e);};
+  li(loss.length===0?'Safe by design: your plugin starts from stock llm-d’s answer and only overrules it when the other path is clearly cheaper. No scenario got worse.'
+                    :`Not yet safe everywhere: it was worse than stock in ${loss.map(nm).join('; ')}.`);
+  win.forEach(r=>li(`${nm(r)}: ${headline(r).text}.`+(r.id==='idle-long'?' With nobody else waiting, it skipped a handoff that only added delay.':'')));
+  if(tie.length)li(`Matched stock in ${tie.length} scenarios: ${tie.map(r=>nm(r)+(r.same?' (same decisions)':'')).join('; ')}.`);
+  loss.forEach(r=>li(`${nm(r)}: ${headline(r).text}.`));
+  li(Math.abs(mo||0)<0.01?'Hardware capacity is unchanged, so no card savings are claimed from this test. The value shown is faster responses for users.':`Total output changed ${(mo*100).toFixed(1)}% across scenarios.`);
+  li('Tested on two identical NVIDIA A30 cards. The plugin’s biggest lever, sending work to a faster card from another vendor, switches on when the Intel Gaudi server is back. That test is next.');
+  // table
+  const tb=$('vTable').tBodies[0],nb=$('vNums').tBodies[0];tb.replaceChildren();nb.replaceChildren();
+  R.forEach(r=>{const tr=document.createElement('tr');
+    const c0=document.createElement('td');const b0=document.createElement('b');b0.textContent=nm(r);const s0=document.createElement('div');s0.className='small muted';s0.textContent=SCN.find(x=>x[0]===r.id)[2]+` · ${r.reps} repeats`;c0.append(b0,s0);tr.appendChild(c0);
+    const c1=document.createElement('td');const b1=document.createElement('span');b1.className='res '+(r.v.w==='plugin'?'win':r.v.w==='stock'?'loss':'tie');b1.textContent=r.v.w==='plugin'?'Plugin wins':r.v.w==='stock'?'Stock wins':'Tie';c1.appendChild(b1);tr.appendChild(c1);
+    td(tr,headline(r).text);tb.appendChild(tr);
+    const nr=document.createElement('tr');td(nr,nm(r));
+    METRICS.forEach(([k])=>{const c=document.createElement('td');const a=r.A[k],b=r.B[k];const f=k==='tokensPerSec'?x=>x==null?'—':fmtN(x):secs;
+      const t=document.createElement('div');t.textContent=a==null&&b==null?'—':`${f(a)} → ${f(b)}`;c.appendChild(t);
+      const x=change(r.A,r.B,k);if(x){const e=document.createElement('div');e.className='small '+(Math.abs(x.c)<0.03?'same-t':x.good?'ok-t':'bad-t');e.textContent=Math.abs(x.c)<0.03?'same':`${x.pct}% ${x.good?'better':'worse'}`;c.appendChild(e);}
+      nr.appendChild(c);});
+    nb.appendChild(nr);});
+  // worth
+  const fleet=Number($('sFleet').value),price=Number($('sPrice').value),pA30=Math.max(0,Number($('aA30').value)||0);
+  $('vSliders').hidden=!(mo!=null&&mo>=0.01);
+  if(mo!=null&&mo>=0.01){const freed=fleet*(1-1/(1+mo)),yearly=freed*(price+pA30)*24*365;
+    $('vWorth').textContent=`Measured output gain of ${(mo*100).toFixed(1)}% means the same work on ${freed.toFixed(1)} fewer of ${fmtN(fleet)} answering cards: about $${fmtN(Math.round(yearly/100)*100)} a year at $${price.toFixed(2)} + $${pA30.toFixed(2)} per hour.`;}
+  else $('vWorth').textContent=`$0 in hardware savings from this test: output stayed within 1% of stock on identical cards. The value is user-facing: ${best?best.h.top.pct+'% '+PHRASE[best.h.top.k][0]+' in '+nm(best.r).toLowerCase():'no clear win yet'}. Card savings depend on the Gaudi test, where cards read at different speeds. Once a test shows an output gain, this section prices it for your fleet.`;
+  $('vFine').textContent=`How a winner is picked: four numbers are compared per scenario (total output, chat smoothness, chat reply start, document start). A side wins a number when it is at least 3% better; the side with more wins takes the scenario. ${D.minutes}-minute runs, stock and plugin alternated each repeat. Answering card: NVIDIA A30, standing in for the Gaudi.`;
+}
+setPreset('busy');drawValue();drawMeasured();
+const start=location.hash.slice(1);if(tabs.some(t=>t.getAttribute('aria-controls')===start))show(start);
+})();
+</script>
