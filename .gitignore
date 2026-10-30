@@ -21,3 +21,4 @@ _to_delete/
 /lab-archive/*.docx
 /lab-archive/*/*
 !/lab-archive/*/results/
+lab/scripts/56-push.sh

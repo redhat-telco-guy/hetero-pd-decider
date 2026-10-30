@@ -1,214 +1,77 @@
 # hetero-pd-decider
 
-**An SLO-aware, hardware-aware decision plugin for heterogeneous prefill/decode disaggregation in [llm-d](https://llm-d.ai).**
+**A hardware-aware prefill/decode decider for [llm-d](https://llm-d.ai). For each request, it decides whether handing the prompt to another card, possibly from another vendor, is worth the KV transfer.**
 
-`hetero-pd-decider` chooses, for every request, whether to:
+In llm-d's prefill/decode (P/D) disaggregation, a request can be split: one card reads the prompt (prefill), then hands the KV cache over [NIXL](https://github.com/ai-dynamo/nixl) to the card that writes the answer (decode). The alternative is that the decode card does both. `hetero-pd-decider` makes that choice per request, using how fast each card is, how busy it is, and what the handoff costs. It starts from llm-d's own answer and changes it only when the other path is clearly faster.
 
-- prefill remotely, transfer the KV cache, and decode on the selected decode pod; or
-- prefill and decode locally on that decode pod.
+## The gap in llm-d today
 
-It makes that choice from the current queue, accelerator profiles, network cost, KV-cache capacity, model compatibility, the time-to-first-token (TTFT) target, and the disruption that local prefill would cause to users already streaming from the decode pod.
+The only conditional rule in llm-d is a fixed threshold on the part of the prompt the decode card has not cached:
 
-The goal is simple: **use cross-vendor prefill/decode disaggregation only when it improves the service—not merely because a prompt is long.**
+> "Disaggregate prefill when `(inputTokens - hitPrefixTokens) >= nonCachedTokens`. `nonCachedTokens = 0` disables it." ([llm-d-router docs](https://github.com/llm-d/llm-d-router/blob/main/docs/coordinator_architecture.md))
 
-> **Illustrative lab:** one NVIDIA A30 prefill pod and two Intel Gaudi 3 decode pods over 25 GbE. Performance values in this README are examples; the lab runbook profiles the real hardware before enabling the policy.
+| What llm-d does today | Source |
+| --- | --- |
+| Default `nonCachedTokens: 0`, which means never split. The doc examples use 8, which splits almost every request. | [docs/disaggregation.md](https://github.com/llm-d/llm-d-router/blob/main/docs/disaggregation.md) |
+| The official P/D guide uses `always-disagg-pd-decider`: every request is split. | [P/D guide](https://llm-d.ai/docs/well-lit-paths/foundations/pd-disaggregation) |
+| The predicted-latency router should be skipped for mixed pools: it "assumes a homogeneous pool". | [Predicted latency](https://llm-d.ai/docs/well-lit-paths/foundations/predicted-latency) |
+| KV transfer cost is not a decision input, even though NIXL over TCP is called "extremely slow". | [P/D architecture](https://llm-d.ai/docs/architecture/disaggregation/pd-disaggregation) |
 
-## The problem: a fixed threshold cannot see the system it is routing
+So one fixed number decides every request, whatever the cards, their queues, or the link between them. When an NVIDIA card and an Intel Gaudi share a pool, a long prompt can be sent to a slower or busier card, or over a slow link, and arrive later than if it had stayed put.
 
-llm-d and vLLM already make a KV-cache handoff between compatible runtimes possible—for example through vLLM `NixlConnector` and the Intel Gaudi heterogeneous NIXL path. They solve the **transport** problem.
+## How it decides (`strategy: auto`, the default)
 
-The stock `prefix-based-pd-decider` solves a narrower **routing** problem: if the uncached prompt is above a fixed number of tokens, split it; otherwise, keep it local. That rule does not know whether the remote prefill pool is queued, the network is slow, the chosen decode pod is idle, or dozens of users are already streaming from it.
+| Step | What happens |
+| --- | --- |
+| 1. Stock answer first | Apply llm-d's rule: split if the uncached prompt is at least `stockNonCachedTokens` (1,024). |
+| 2. Safety checks | Keep the request local if the prompt is short (< 256 tokens), there is no eligible prefill pod, the decode card's KV cache is ≥ 90% full, or decode is disabled. If any card class has no speed profile, use the stock answer. |
+| 3. Price both paths | **keep** = local prefill time + the stall it causes for answers already streaming on that card.<br>**move** = remote prefill time + the remote card's queue + KV transfer time + fixed handoff time. |
+| 4. Overrule only when clearly better | Change stock's answer only if the other path is at least 25% cheaper (`overrideMargin`), and for a move, only if it also meets the TTFT target. |
 
-| Current rule | Decision | Inputs it ignores |
-| --- | --- | --- |
-| `prefix-based-pd-decider` | Prompt longer than `N` tokens → remote prefill; otherwise → local prefill and decode | Queue depth, link health, accelerator type, KV-cache headroom, model identity, and active decode streams |
+**Examples** (A30 reads prompts, Gaudi 3 writes answers, stock threshold 1,024 tokens):
 
-This is a sensible default when the two pools are identical and lightly loaded. It becomes inefficient when the pool is heterogeneous or traffic is bursty.
-
-## The proposed decision: choose the least harmful path now
-
-After llm-d has selected the decode pod, `hetero-pd-decider` evaluates the two feasible paths for that specific request.
-
-| Candidate path | Estimated from | Selected when |
-| --- | --- | --- |
-| Remote prefill → KV transfer → decode | Remote prefill rate, prefill queue, transfer time | It is safe, meets the TTFT SLO, and is preferable to local prefill plus its stream-stall cost. |
-| Local prefill + decode | Decode-pod prefill rate, local queue, active streams | Remote is unsafe, cannot meet the SLO, or local delivery is the better experience. |
-
-Before either path is used, the plugin checks model identity, KV-cache headroom, link health, measured profiles, the SLO, and any operator opt-out labels.
-
-The plugin therefore balances two experiences:
-
-1. **The new user:** how quickly will their first token arrive?
-2. **Users already decoding on that pod:** will their token streams stall while that pod prefills a new long prompt?
-
-Prefill/decode disaggregation exists largely to avoid the second problem. A long local prefill can briefly monopolize a decode accelerator and make active token streams stutter. A fixed prompt-length threshold cannot price that cost in.
-
-### The decision model
-
-For each eligible remote prefill path, the plugin estimates:
-
-```text
-remote TTFT = remote prefill time + prefill queue time + KV-transfer time
-local TTFT  = local prefill time + decode-pod queue time
-stall cost  = active decode streams × local prefill time
-
-split only when the remote path is safe, meets the TTFT SLO,
-and wins against local TTFT plus the configured active-stream stall cost
-```
-
-The actual inputs are measured accelerator profiles and live service signals—not a hard-coded assumption that every long prompt should be split.
-
-## The eight scenarios this design covers
-
-The first four scenarios change **where one request is prefetched**. Scenario 5 changes **how much capacity exists** over minutes. Scenarios 6–8 change the policy or protect correctness. Together, they show why one static prompt-length threshold is not enough.
-
-### Scenario quick reference
-
-| # | Scenario | What the plugin decides | Why it matters | Delivery status |
-| ---: | --- | --- | --- | --- |
-| 1 | Fixed pools, same hardware | Use remote prefill only when queue and link conditions still make it worthwhile. | Avoids needless remote waits during bursts or network congestion. | Current scope |
-| 2 | Fixed pools, A30 prefill + Gaudi decode | Balance remote TTFT against the stall that local prefill would impose on active Gaudi streams. | Protects live conversations while meeting the new user's TTFT SLO. | Current scope |
-| 3 | Gaudi pods prefill for each other | Compare the A30, an idle Gaudi, and local prefill as specific sources. | Uses idle Gaudi capacity and avoids a queued A30. | Planned interface evolution |
-| 4 | Several prefill pools of different types | Choose the source with the best safe predicted TTFT after queueing and transfer cost. | The fastest accelerator is not always the fastest end-to-end path. | Planned interface evolution |
-| 5 | Pool sizes change over time | Resize or re-role prefill and decode capacity from observed traffic mix. | Turns request-level routing into durable fleet cost savings. | Future control-plane capability |
-| 6 | Cost mode | When several paths meet the SLO, choose the lower-cost eligible path. | Frees premium decode capacity without reducing user experience. | Future policy mode |
-| 7 | Degraded or unsafe path | Reject the handoff and keep the request local. | Prevents incorrect output, KV-cache exhaustion, and latency failures. | Current safety behavior |
-| 8 | Missing profiles or metrics | Use llm-d's stock fixed-threshold decision rather than guessing. | Enables incremental rollout with a safe fallback. | Current fallback behavior |
-
-### 1. Fixed pools, same hardware
-
-**Setup:** the prefill and decode pools use the same accelerator type, for example H100s on both sides.
-
-**Stock decision:** send long prompts to the prefill pool; keep short prompts local.
-
-**Plugin decision:** use the same basic split, but also see the prefill queue and link health. If the prefill pool is backed up or the link is congested, keep an otherwise eligible request local.
-
-**Value: small but useful.** The stock threshold is broadly reasonable here; the improvement appears under bursty traffic or a constrained network.
-
-### 2. Fixed pools, different vendors — the A30/Gaudi lab
-
-**Setup:** one NVIDIA A30 is the prefill pool; two Intel Gaudi 3 pods are the decode pool.
-
-For a 2,000-token prompt, assume an A30 prefill rate of about 5,000 tokens/s, a Gaudi 3 prefill rate of about 20,000 tokens/s, a 25 GbE link, and a 1-second TTFT target. These figures are illustrative.
-
-| Path | Estimated TTFT | Effect on users already generating on the Gaudi |
-| --- | ---: | --- |
-| Remote: A30 prefill → KV transfer → Gaudi decode | about 0.5 s | None |
-| Local: Gaudi prefill + decode | about 0.1 s | Every active stream can pause for about 0.1 s |
-
-| Situation | Stock fixed-threshold decider | `hetero-pd-decider` | Why it matters |
+| Situation | Stock | Plugin | Why |
 | --- | --- | --- | --- |
-| Long prompt; Gaudi is serving 40 active streams | Remote | Remote | The new user stays within the SLO and 40 active conversations do not stutter. |
-| Long prompt; Gaudi is idle | Remote, about 0.5 s TTFT | Local, about 0.1 s TTFT | Nobody is disturbed, so the transfer is unnecessary. |
-| Ten long prompts arrive together | All queue behind the A30 | Use remote while it can meet the SLO; send overflow local | A single prefill card does not turn a burst into multi-second waits. |
-| Short or mostly cached prompt | Local | Local | The transfer overhead is not worthwhile. |
+| Long new document, Gaudi idle | split | **keep** | The Gaudi reads it faster itself, with no handoff. |
+| Long new document, Gaudi busy with many streams | split | split | Moving protects the answers already streaming. |
+| Long document, A30 queue backed up | split | **keep** | Waiting in the A30 queue costs more than it saves. |
+| Chat turn, mostly cached | keep | keep | Little new text, so the handoff isn't worth it. |
+| Short prompt | keep | keep | Below 256 tokens it always stays local. |
+| Gaudi KV cache 95% full | split | **keep** | Safety: the KV lands on the Gaudi either way, so a transfer adds cost and risk without freeing memory. |
 
-**Value: medium to high.** This is the core lab scenario: the fixed threshold cannot see that an A30 and a Gaudi behave differently or that active decode streams deserve protection.
+Each decision is counted in `llm_d_epp_hetero_pd_decision_total{reason}`, where `reason` is `stock-split`, `stock-keep`, `override-keep`, `override-move`, `short-prompt`, `decode-kv-full`, `decode-disabled`, or `no-prefill-candidate`.
 
-### 3. Gaudi pods can prefill for each other
+## Results so far
 
-**Setup:** the A30 remains available, but Gaudi pods are also eligible prefill sources.
+**Lab:** OpenShift 4.22, 2 × NVIDIA A30, Qwen2.5-7B-Instruct, vLLM 0.26.0, NIXL over TCP. Compared against stock at `nonCachedTokens: 1024`, over 3 test suites × 6 scenarios (9 repeats).
 
-**Example:** Gaudi-1 is decoding for 50 users, Gaudi-2 has 5 users, and the A30 has six requests queued. The best choice may be Gaudi-2 prefill → KV transfer → Gaudi-1 decode: it avoids interrupting Gaudi-1 while bypassing the A30 queue.
-
-**What is new:** the plugin must compare specific prefill pods, not merely “the prefill pool” versus “local.” This is a planned interface evolution, not a claim that the current v1 interface already selects arbitrary source pods.
-
-**Value: high.** It turns idle capacity in the decode fleet into a useful, fast prefill option.
-
-### 4. Several prefill pools of different types
-
-**Setup:** an A30 prefill pool and a B200 prefill pool both feed Gaudi decode pods.
-
-**Example:** the B200 is much faster but already has eight requests queued; the A30 is idle. For a 1,500-token prompt, the plugin compares waiting for B200 against starting on A30 immediately and selects the path with the best safe predicted TTFT.
-
-**What is new:** like scenario 3, this needs specific-pod or specific-pool comparison in the llm-d interface.
-
-**Value: high.** “Fastest accelerator” is not necessarily the fastest path once queueing is included.
-
-### 5. Pool sizes change over time
-
-**Setup:** a ratio controller complements the per-request plugin.
-
-| Time scale | Component | Responsibility |
-| --- | --- | --- |
-| Minutes | Ratio controller | Resize or re-role prefill and decode capacity as traffic changes. |
-| Milliseconds | `hetero-pd-decider` | Route each request and absorb bursts between capacity changes. |
-
-During the day, chat traffic can be decode-heavy; the controller adds Gaudi decode capacity. At night, a long-prompt summarization workload can justify more inexpensive prefill capacity. In a fixed lab, it cannot add hardware, but it can recommend the right purchase ratio or re-role eligible Gaudi pods.
-
-**Value: highest long-term cost impact.** The per-request plugin protects the service now; the controller right-sizes the fleet later.
-
-### 6. Cost mode
-
-**Setup:** the TTFT SLO has slack—for example, 2 seconds when both feasible paths complete in less than 1 second.
-
-**Plugin decision:** when more than one path meets the SLO and safety checks, prefer the lower-cost path. An A30 prefill can free more expensive Gaudi capacity for decode, reducing the number of Gaudi pods required for the same user load.
-
-**Value: medium.** Cost mode is a tie-breaker; scenario 5 is what turns it into sustained infrastructure savings.
-
-### 7. A path is degraded or unsafe
-
-**Setup:** the plugin detects any of the following:
-
-- the network is slow or a KV transfer fails;
-- the target Gaudi KV cache is nearly full;
-- prefill and decode pods run different approved model builds or tokenizers; or
-- a cross-vendor correctness/drift canary fails.
-
-**Plugin decision:** do not attempt the split. Keep the request local on one approved runtime.
-
-**Value: safety.** Cross-vendor serving must not quietly produce incorrect output or violate latency targets.
-
-### 8. Required data is missing
-
-**Setup:** a new accelerator class has joined the cluster but has not been profiled, or the metrics service is unavailable.
-
-**Plugin decision:** do not invent an estimate. Fall back to llm-d's fixed prompt-length threshold rule.
-
-**Value: safe adoption.** The plugin can be introduced incrementally: in the worst case, it behaves like the stock decider.
-
-## What this adds to the existing stack
-
-| Layer | Responsibility |
+| Scenario | Result |
 | --- | --- |
-| NIXL / runtime connector | Makes a compatible KV-cache handoff technically possible. |
-| `hetero-pd-decider` | Uses the handoff only when it is safe and beneficial for the request. |
-| Result | Better TTFT, smoother active streams, efficient capacity use, and a safe local fallback. |
+| Idle, long documents | **First-token time 0.71 s → 0.35 s (−50%)** |
+| The other 5 scenarios (busy chat, mixed traffic, bursts, cached chat, huge prompts) | **Tie**: same decisions and results within noise, so no regression where stock was already right |
 
-The plugin is deliberately **not** a replacement for llm-d, vLLM, NIXL, or accelerator vendors' runtime plugins. It is the decision layer between **“a KV handoff is technically possible”** and **“this handoff is the best safe choice for this request right now.”**
+NIXL handoff took 2–5 ms when idle. Under load, 71% of 27,769 transfers took 0.1–0.75 s over TCP. That's why transfer cost belongs in the decision.
 
-See [docs/design.md](docs/design.md) for the detailed decision model and implementation contracts.
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| [`plugin/llm-d-patch/`](plugin/llm-d-patch) | Patch for [llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler) at the commit in `BASE_COMMIT` |
-| [`plugin/src/`](plugin/src) | Readable copies of the plugin sources from the patch, plus a sample EPP config |
-| [`plugin/src/hetero/`](plugin/src/hetero) | Decision core, standard library only, with its own `go.mod` for standalone tests |
-| [`lab/`](lab) | Runbook, Helm values, Kustomize layouts and scripts for one NVIDIA A30 and two Intel Gaudi 3 on OpenShift |
-| [`tools/xvkv/`](tools/xvkv) | Earlier cross-vendor KV handoff prototype; its drift harness checks cross-vendor output correctness |
-| [`docs/`](docs) | Design notes |
+**Mixed vendor (A30 + Intel Gaudi 3):** the plugin builds, deploys and makes cross-vendor decisions (smoke test: `override-keep` with the Gaudi as the decode card). Full test suites are waiting on a cooling fix for the Gaudi server.
 
 ## Quick start
 
-Test the decision core (Go 1.22 or newer):
+Test the decision core (Go 1.22+):
 
 ```bash
 cd plugin/src/hetero && go test -v ./...
 ```
 
-Build an llm-d EPP image with the plugin:
+Build an llm-d router image with the plugin. The patch applies to the commit in `BASE_COMMIT`, to `v1.0.0`, and to current `main`.
 
 ```bash
-git clone https://github.com/llm-d/llm-d-inference-scheduler.git && cd llm-d-inference-scheduler
+git clone https://github.com/llm-d/llm-d-router.git && cd llm-d-router
 git checkout -b hetero-pd-decider $(cat ../plugin/llm-d-patch/BASE_COMMIT)
 git apply ../plugin/llm-d-patch/hetero-pd-decider.patch
-make test-filter PATTERN='HeteroPD|TestDecide|TestConfigValidate' TYPE=epp
 make image-build-epp EPP_IMAGE=quay.io/<you>/llm-d-router-endpoint-picker:hetero-pd-dev
 ```
 
-Configure it in the EPP plugin config:
+Configure it (Alpha plugin, so start the router with `--allow-experimental-plugins=true`). Pods need the labels `llm-d.ai/role` and `llm-d.ai/accelerator-class`.
 
 ```yaml
 - type: disagg-profile-handler
@@ -217,33 +80,50 @@ Configure it in the EPP plugin config:
       prefill: hetero-pd-decider
 - type: hetero-pd-decider
   parameters:
+    strategy: auto              # auto | model | guarded-stock
+    stockNonCachedTokens: 1024  # stock's threshold, used as the starting answer
+    overrideMargin: 0.25        # overrule stock only when the other path is 25% cheaper
     ttftSLOMs: 1000
-    bandwidthGbps: 25
+    bandwidthGbps: 10
+    handoffOverheadMs: 82       # measure on your cluster
+    kvBytesPerToken: 57344      # Qwen2.5-7B, bf16
     profiles:
-      nvidia-a30:   {prefillTokensPerSec: 5000}
-      intel-gaudi3: {prefillTokensPerSec: 20000}
+      nvidia-a30:   {prefillTokensPerSec: 7035}   # measured
+      intel-gaudi3: {prefillTokensPerSec: 20000}  # placeholder until measured
 ```
 
-Then follow [lab/README.md](lab/README.md) to deploy, check correctness, profile the hardware and run the A/B test against the stock decider.
+The full sample is in [plugin/src/hetero-pd-epp-config.yaml](plugin/src/hetero-pd-epp-config.yaml).
 
-## Status
+## Repository layout
 
-| Component | State |
+| Path | Contents |
 | --- | --- |
-| Decision core (`plugin/src/hetero`) | Compiled and tested; 98% statement coverage |
-| llm-d adapter (`hetero_pd_decider.go`) and its tests | Written against llm-d-inference-scheduler at `BASE_COMMIT`; first compile happens in lab step 1 |
-| Lab manifests and scripts | Kustomize layouts build; scripts tested against a mock OpenAI streaming server |
-| Hardware results | Pending |
+| [`plugin/llm-d-patch/`](plugin/llm-d-patch) | The patch for llm-d-router, and the commit it was built on |
+| [`plugin/src/`](plugin/src) | Readable plugin sources, tests (100% coverage of the decision core) and a sample config |
+| [`lab/a30-only/`](lab/a30-only) | Scripted rebuild of the A30 lab on any OpenShift cluster with two A30s |
+| [`lab/mixed/`](lab/mixed) | A30 + Gaudi 3 build and deploy, the in-cluster Gaudi thermal watchdog, and the thermal test |
+| [`lab/dashboard2/`](lab/dashboard2) | Lab dashboard: decision walkthrough, router mode switch, traffic and test suites, value summary |
+| [`lab/hwmon/`](lab/hwmon) | Live hardware panel (fans, temperatures, power and network cards from the BMC and drivers) and a heat test |
+| [`lab/scripts/`](lab/scripts) | Step-by-step lab scripts: operators, builds, calibration, correctness, health checks, export |
+| [`lab-archive/*/results/`](lab-archive) | Raw suite results and run history behind the numbers above |
+| [`docs/`](docs) | Design notes and the upstream feature request |
+| [`tools/xvkv/`](tools/xvkv) | Earlier cross-vendor KV handoff prototype and its output-drift checks |
 
-Plugin stability: Alpha.
+## Roadmap
 
-## Related upstream work
+- **Measure card speeds automatically** instead of configuring them, so a new accelerator class works without hand-entered figures.
+- **Mixed-vendor test suites** (A30 + Gaudi 3, both directions) once the Gaudi server's cooling is fixed.
+- **Choose between specific prefill pods**, for example an idle Gaudi preparing a prompt for a busy one, instead of only "remote pool or local".
+- **Cost mode:** when several paths meet the target, prefer the cheaper hardware.
 
-- [vLLM NixlConnector roadmap](https://github.com/vllm-project/vllm/issues/33702) and [heterogeneous block size RFC](https://github.com/vllm-project/vllm/issues/26744)
+See [docs/design.md](docs/design.md) for the original design and the longer list of scenarios.
+
+## Related work
+
+- [llm-d P/D disaggregation](https://llm-d.ai/docs/architecture/disaggregation/pd-disaggregation) and [predicted-latency routing](https://llm-d.ai/docs/well-lit-paths/foundations/predicted-latency)
 - [vllm-gaudi heterogeneous NIXL connector](https://docs.vllm.ai/projects/gaudi/en/0.24.0/api/vllm_gaudi/distributed/kv_transfer/kv_connector/v1/hetero_hpu_nixl_connector.html)
-- [llm-d disaggregated serving](https://llm-d.ai/docs/architecture/advanced/disaggregation) and [latency predictor](https://llm-d.ai/docs/dev/architecture/router/latency-predictor)
 - [llm-d three-vendor heterogeneous serving](https://llm-d.ai/blog/heterogeneous-inference-3-vendor-sovereign-cluster)
 
 ## License
 
-Apache License 2.0. The plugin is written as a contribution to llm-d, which is Apache 2.0.
+Apache License 2.0, the same as llm-d.
