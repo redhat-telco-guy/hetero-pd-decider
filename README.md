@@ -47,8 +47,22 @@ Each decision is counted in `llm_d_epp_hetero_pd_decision_total{reason}`, where 
 
 | Scenario | Result |
 | --- | --- |
-| Idle, long documents | **First-token time 0.71 s → 0.35 s (−50%)** |
-| The other 5 scenarios (busy chat, mixed traffic, bursts, cached chat, huge prompts) | **Tie**: same decisions and results within noise, so no regression where stock was already right |
+| Quiet hours, documents only (~2,000 tokens) | **First-token time 704 ms → 352 ms (−50%)** |
+| The other 5 scenarios (peak chat; peak chat + medium, long or very long documents; light chat) | **Tie**: same decisions or results within a few percent, so no regression where stock was already right |
+
+### Lab dashboard results
+
+The suite verdict from the lab dashboard's Value tab (latest suite, Oct 29, 2026, 36 runs, auto vs stock):
+
+![Suite verdict: won 1, tied 5, lost 0](docs/images/value-verdict.png)
+
+![Headline numbers: 50% faster document responses, 0 scenarios worse, total output unchanged](docs/images/value-kpis.png)
+
+![Scenario by scenario results](docs/images/value-scenarios.png)
+
+How the plugin reached the winning decision for an idle 2,000-token document (dashboard "How it decides" tab). Stock says move; the plugin keeps it because keeping costs 284 ms against 458 ms for moving:
+
+![Decision walkthrough: stock move overruled to keep](docs/images/decide-idle.png)
 
 NIXL handoff took 2–5 ms when idle. Under load, 71% of 27,769 transfers took 0.1–0.75 s over TCP. That's why transfer cost belongs in the decision.
 
