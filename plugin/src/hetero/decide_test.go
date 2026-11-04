@@ -32,6 +32,8 @@ const (
 func labConfig() Config {
 	c := DefaultConfig()
 	c.Strategy = StrategyModel
+	// The cost-model tests leave KV compatibility out; it has its own tests.
+	c.Compatibility = CompatibilityOff
 	c.TTFTSLOMs = 1000
 	c.BandwidthGbps = 25
 	c.Profiles = map[string]Profile{
@@ -157,18 +159,145 @@ func TestDecideSameClassBandwidth(t *testing.T) {
 	assertNear(t, "transfer", d.TransferSeconds, 2000.0*131072/25e9)
 }
 
-func TestDecideFingerprintMismatch(t *testing.T) {
+func TestDecideCompatKeyMismatch(t *testing.T) {
+	c := labConfig()
+	c.Compatibility = CompatibilityAuto
 	decode := gaudi(40)
-	decode.Fingerprint = "llama-3.1-8b@abc"
+	decode.CompatKey = "qwen7b|hpu|hetero-layout"
 	other := a30(0)
-	other.Fingerprint = "llama-3.1-8b@def"
-	d := Decide(labConfig(), promptLong, decode, []Pod{other})
-	if d.Remote || d.Reason != ReasonNoPrefillCandidate {
-		t.Fatalf("mismatched fingerprints must not split, got %+v", d)
+	other.CompatKey = "qwen7b|flash-attn|hnd"
+	d := Decide(c, promptLong, decode, []Pod{other})
+	if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
+		t.Fatalf("different keys must not split, got %+v", d)
 	}
-	other.Fingerprint = decode.Fingerprint
-	if !Decide(labConfig(), promptLong, decode, []Pod{other}).Remote {
-		t.Fatal("matching fingerprints should split")
+	c.ApprovedPairs = []string{other.CompatKey + "->" + decode.CompatKey}
+	if !Decide(c, promptLong, decode, []Pod{other}).Remote {
+		t.Fatal("an approved pair should split")
+	}
+	// Approval is directional: the reverse direction stays blocked.
+	rev := Decide(c, promptLong, Pod{Name: "a30-d", Class: classA30, CompatKey: other.CompatKey, Running: 40},
+		[]Pod{{Name: "gaudi-p", Class: classGaudi3, CompatKey: decode.CompatKey}})
+	if rev.Remote || rev.Reason != ReasonNoCompatiblePrefill {
+		t.Fatalf("approval must not apply in reverse, got %+v", rev)
+	}
+	// A live approval on the decode pod works like an approved pair, in one direction.
+	c.ApprovedPairs = nil
+	if Decide(c, promptLong, decode, []Pod{other}).Remote {
+		t.Fatal("without approval different keys must not split")
+	}
+	approved := decode
+	approved.Accepts = []string{"something-else", other.CompatKey}
+	if !Decide(c, promptLong, approved, []Pod{other}).Remote {
+		t.Fatal("a decode pod that accepts the prefill key should split")
+	}
+	other.CompatKey = decode.CompatKey
+	if !Decide(c, promptLong, decode, []Pod{other}).Remote {
+		t.Fatal("equal keys should split")
+	}
+}
+
+func TestMixed(t *testing.T) {
+	a, b := Pod{Name: "a", Class: classA30}, Pod{Name: "b", Class: classA30}
+	if Mixed(a, []Pod{b}) {
+		t.Fatal("one class is not mixed")
+	}
+	if !Mixed(a, []Pod{b, {Name: "g", Class: classGaudi3}}) {
+		t.Fatal("two classes are mixed")
+	}
+	if !Mixed(a, []Pod{{Name: "u"}}) {
+		t.Fatal("a labelled pod next to an unlabelled one is mixed")
+	}
+	if Mixed(Pod{Name: "x"}, []Pod{{Name: "y"}}) {
+		t.Fatal("a pool without class labels is one class")
+	}
+	if Mixed(a, nil) {
+		t.Fatal("no candidates is not mixed")
+	}
+}
+
+func TestCompatibleModes(t *testing.T) {
+	keyed := func(name, class, key string) Pod { return Pod{Name: name, Class: class, CompatKey: key} }
+	tests := []struct {
+		name  string
+		mode  string
+		p, d  Pod
+		mixed bool
+		want  bool
+	}{
+		{"auto, same key", CompatibilityAuto, keyed("p", classA30, "k1"), keyed("d", classGaudi3, "k1"), true, true},
+		{"auto, different keys", CompatibilityAuto, keyed("p", classA30, "k1"), keyed("d", classA30, "k2"), false, false},
+		{"auto, missing key, one class", CompatibilityAuto, keyed("p", classA30, ""), keyed("d", classA30, ""), false, true},
+		{"auto, missing key, mixed pool", CompatibilityAuto, keyed("p", classA30, ""), keyed("d", classGaudi3, "k1"), true, false},
+		{"empty mode is auto", "", keyed("p", classA30, ""), keyed("d", classGaudi3, ""), true, false},
+		{"strict, missing key, one class", CompatibilityStrict, keyed("p", classA30, ""), keyed("d", classA30, "k1"), false, false},
+		{"strict, same key", CompatibilityStrict, keyed("p", classA30, "k1"), keyed("d", classA30, "k1"), false, true},
+		{"off, different keys", CompatibilityOff, keyed("p", classA30, "k1"), keyed("d", classGaudi3, "k2"), true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Compatibility = tt.mode
+			if got := c.Compatible(tt.p, tt.d, tt.mixed); got != tt.want {
+				t.Fatalf("Compatible = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A mixed pool without compatibility keys never splits, whatever the strategy, so a
+// pair that cannot exchange KV never reaches a handshake.
+func TestDecideMixedPoolWithoutKeysKeepsLocal(t *testing.T) {
+	for _, strategy := range []string{StrategyAuto, StrategyModel, StrategyGuardedStock} {
+		t.Run(strategy, func(t *testing.T) {
+			c := labConfig()
+			c.Compatibility = CompatibilityAuto
+			c.Strategy = strategy
+			c.StockNonCachedTokens = 1024
+			d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)})
+			if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
+				t.Fatalf("got %+v", d)
+			}
+		})
+	}
+}
+
+func TestDecideExcludedPairIsNotACandidate(t *testing.T) {
+	c := labConfig()
+	p := a30(0)
+	p.Excluded = true
+	d := Decide(c, promptLong, gaudi(40), []Pod{p})
+	if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
+		t.Fatalf("an excluded pair must not be used, got %+v", d)
+	}
+	other := Pod{Name: "a30-1", Class: classA30}
+	if d := Decide(c, promptLong, gaudi(40), []Pod{p, other}); !d.Remote || d.Prefill != "a30-1" {
+		t.Fatalf("want the remaining pod, got %+v", d)
+	}
+}
+
+func TestDecideModelFallbackNamesCompatiblePod(t *testing.T) {
+	c := labConfig()
+	delete(c.Profiles, classGaudi3)
+	d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)})
+	if !d.Fallback || d.Prefill != "a30-0" {
+		t.Fatalf("fallback should name the compatible pod, got %+v", d)
+	}
+	c.Compatibility = CompatibilityAuto
+	if d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)}); d.Fallback || d.Reason != ReasonNoCompatiblePrefill {
+		t.Fatalf("without a compatible pod there is nothing to fall back to, got %+v", d)
+	}
+}
+
+func TestDecideNoCandidateVersusNoCompatible(t *testing.T) {
+	c := labConfig()
+	c.Compatibility = CompatibilityAuto
+	if d := Decide(c, promptLong, gaudi(40), nil); d.Reason != ReasonNoPrefillCandidate {
+		t.Fatalf("no pods at all: got %q", d.Reason)
+	}
+	off := a30(0)
+	off.Disabled = true
+	if d := Decide(c, promptLong, gaudi(40), []Pod{off}); d.Reason != ReasonNoPrefillCandidate {
+		t.Fatalf("only a disabled pod: got %q", d.Reason)
 	}
 }
 
@@ -204,6 +333,12 @@ func TestConfigValidate(t *testing.T) {
 		func(c *Config) { c.IdleRunningRequests = -1 },
 		func(c *Config) { c.OverrideMargin = 1 },
 		func(c *Config) { c.OverrideMargin = -0.1 },
+		func(c *Config) { c.Compatibility = "loose" },
+		func(c *Config) { c.ApprovedPairs = []string{"k1"} },
+		func(c *Config) { c.ApprovedPairs = []string{"->k2"} },
+		func(c *Config) { c.FailureThreshold = -1 },
+		func(c *Config) { c.ExclusionSeconds = -1 },
+		func(c *Config) { c.FailureThreshold, c.ExclusionSeconds = 3, 0 },
 	}
 	for i, mutate := range bad {
 		c := labConfig()
@@ -296,6 +431,7 @@ func TestDecideCalibratedLabScenarios(t *testing.T) {
 func calibratedA30Pair(strategy string) (Config, Pod, Pod) {
 	c := DefaultConfig()
 	c.Strategy = strategy
+	c.Compatibility = CompatibilityOff // cost-model tests; compatibility has its own tests
 	c.KVBytesPerToken = 57344
 	c.TTFTSLOMs = 1000
 	c.BandwidthGbps = 10
@@ -452,5 +588,32 @@ func TestDecideGuardedStockUnprofiledReaderIsStock(t *testing.T) {
 	d := Decide(c, 2000, idle, []Pod{{Name: "mi300", Class: "amd-mi300x"}})
 	if !d.Remote || d.Reason != ReasonStockSplit || d.Prefill != "mi300" {
 		t.Fatalf("got %+v", d)
+	}
+}
+
+func TestDecideModelUnprofiledCandidateKeepsLocal(t *testing.T) {
+	c := labConfig()
+	d := Decide(c, promptLong, gaudi(40), []Pod{{Name: "mi300", Class: "amd-mi300x"}})
+	if d.Remote || d.Reason != ReasonNoPrefillCandidate {
+		t.Fatalf("an unprofiled candidate cannot be priced, got %+v", d)
+	}
+}
+
+func TestDecideMeasuredSpeedOverridesProfile(t *testing.T) {
+	c := labConfig()
+	slow := Pod{Name: "a30-slow", Class: classA30, PrefillTokensPerSec: 1000}
+	fast := Pod{Name: "a30-fast", Class: classA30, PrefillTokensPerSec: 9000}
+	d := Decide(c, promptLong, gaudi(40), []Pod{slow, fast})
+	if !d.Remote || d.Prefill != "a30-fast" {
+		t.Fatalf("want split to the faster measured pod, got %+v", d)
+	}
+	// A measured decode speed replaces a missing class profile.
+	dec := Pod{Name: "x", Class: "unknown", Running: 40, PrefillTokensPerSec: 20000}
+	if d := Decide(c, promptLong, dec, []Pod{a30(0)}); d.Reason == ReasonMissingProfile {
+		t.Fatalf("measured decode speed should replace the missing profile: %+v", d)
+	}
+	// Zero means not measured: the class profile is used.
+	if r, ok := c.podRate(Pod{Class: classA30}); !ok || r != 5000 {
+		t.Fatalf("podRate fallback = %v, %v", r, ok)
 	}
 }

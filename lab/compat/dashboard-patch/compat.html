@@ -1,0 +1,5 @@
+    <div class="panel" id="compatPanel">
+      <div class="hwhead"><h2 style="margin:0">Card compatibility</h2><span class="pill p-idle" id="cpState">Loading…</span></div>
+      <p class="muted small" style="margin:6px 0 10px">Two cards can hand a prompt's notes (the KV cache) to each other only when they run the same settings: model, vLLM build, attention method, KV layout. Each model server gets a compatibility key from those settings. <b>Same key:</b> allowed automatically. <b>Different keys:</b> blocked, tested automatically, and allowed only after you approve a passed test. Changes apply within about 30 seconds; the router is not restarted.</p>
+      <div id="cpBody"></div>
+    </div>

@@ -23,3 +23,4 @@ _to_delete/
 !/lab-archive/*/results/
 lab/scripts/56-push.sh
 lab/scripts/56-push.sh
+lab/scripts/57-pr.sh

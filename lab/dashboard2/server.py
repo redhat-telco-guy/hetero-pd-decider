@@ -6,10 +6,11 @@ Serves /app/web and a small API:
   POST /api/mode           {"mode": "hetero" | "guarded" | "auto" | "stock"}  switch the router's decider
   POST /api/traffic/start  {"users": 32, "docsPerSec": 0.5, "minutes": 3}
   POST /api/traffic/stop
+  GET  /api/inventory    what runs on this cluster: GPU nodes, model servers, router, model
   GET  /api/hw             live hardware readings (hw-monitor on each worker + Gaudi watchdog), last hour of history
 Traffic goes to the router service, exactly like a real client.
 """
-import http.client, json, os, random, re, ssl, threading, time, urllib.parse, urllib.request
+import http.client, json, os, random, re, ssl, threading, time, urllib.error, urllib.parse, urllib.request
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 NS = open("/var/run/secrets/kubernetes.io/serviceaccount/namespace").read().strip()
@@ -20,7 +21,7 @@ EPP_DEPLOY = os.environ.get("EPP_DEPLOYMENT", "hetero-pd-epp")
 ROUTER_HOST = os.environ.get("ROUTER_HOST", f"hetero-pd-epp.{NS}.svc")
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "80"))
 EPP_METRICS = os.environ.get("EPP_METRICS_URL", f"http://hetero-pd-epp.{NS}.svc:9090/metrics")
-MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-7B-Instruct")
+MODEL_ENV = os.environ.get("MODEL", "")   # fallback only: the model is read from the running model servers
 SELECTOR = "llm-d.ai/guide=hetero-pd"
 MODES = {"hetero": "hetero-pd-config.yaml", "guarded": "guarded-pd-config.yaml", "auto": "auto-pd-config.yaml",
          "stock": "stock-pd-config.yaml", "always": "always-pd-config.yaml"}
@@ -93,6 +94,134 @@ def set_mode(mode):
     patch = {"spec": {"template": {"spec": {"containers": [{"name": "epp", "args": args}]}}}}
     k8s("PATCH", f"/apis/apps/v1/namespaces/{NS}/deployments/{EPP_DEPLOY}", patch, "application/strategic-merge-patch+json")
 
+# ---------------- what runs on this cluster (Stack tab; model name for traffic) ----------------
+def arg_val(args, name):
+    for i, a in enumerate(args):
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+def ms_container(p):
+    cs = p["spec"]["containers"]
+    return next((c for c in cs if c["name"] == "modelserver"), next((c for c in cs if "vllm" in (c.get("image") or "")), cs[0]))
+
+def pod_model(c):
+    cmd, args = list(c.get("command") or []), list(c.get("args") or [])
+    full = cmd + args
+    if "serve" in full and full.index("serve") + 1 < len(full) and not full[full.index("serve") + 1].startswith("-"):
+        return full[full.index("serve") + 1]
+    m = arg_val(full, "--model")
+    if m:
+        return m
+    return next((a for a in args if not a.startswith("-") and a not in ("vllm", "serve")), None)
+
+SERVED = {"model": None, "t": 0}
+def current_model():
+    if SERVED["model"] and time.time() - SERVED["t"] < 30:
+        return SERVED["model"]
+    try:
+        items = k8s("GET", f"/api/v1/namespaces/{NS}/pods?labelSelector={urllib.parse.quote(SELECTOR)}")["items"]
+        seen = {}
+        for p in items:
+            if p["status"].get("phase") == "Running":
+                m = pod_model(ms_container(p))
+                if m:
+                    seen[m] = seen.get(m, 0) + 1
+        if seen:
+            SERVED.update(model=max(seen, key=seen.get), t=time.time())
+    except Exception:
+        pass
+    return SERVED["model"] or MODEL_ENV or "unknown-model"
+
+def gib(q):
+    m = re.match(r"^(\d+)(Ki|Mi|Gi)?$", q or "")
+    if not m:
+        return q or ""
+    b = int(m.group(1)) * {"Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3, None: 1}[m.group(2)]
+    return f"{round(b / 1024 ** 3)}Gi"
+
+def to_int(v):
+    try:
+        return int(float(v))
+    except Exception:
+        return 0
+
+INV = {"t": 0, "data": None}
+def inventory():
+    if INV["data"] and time.time() - INV["t"] < 20:
+        return INV["data"]
+    cluster = {}
+    try:
+        cluster["kubernetes"] = k8s("GET", "/version").get("gitVersion", "")
+    except Exception:
+        pass
+    try:
+        cv = k8s("GET", "/apis/config.openshift.io/v1/clusterversions/version")
+        cluster["openshift"] = (cv.get("status", {}).get("desired") or {}).get("version", "")
+    except Exception:
+        pass
+    nodes = []
+    for n in k8s("GET", "/api/v1/nodes")["items"]:
+        lab = n["metadata"].get("labels", {}); st = n.get("status", {})
+        cap, alloc, ni = st.get("capacity", {}), st.get("allocatable", {}), st.get("nodeInfo", {})
+        gpus = []
+        if "nvidia.com/gpu" in cap or "nvidia.com/gpu.product" in lab:
+            drv = lab.get("nvidia.com/cuda.driver-version.full") or ".".join(x for x in (lab.get("nvidia.com/cuda.driver.major"), lab.get("nvidia.com/cuda.driver.minor"), lab.get("nvidia.com/cuda.driver.rev")) if x)
+            rt = lab.get("nvidia.com/cuda.runtime-version.full") or ".".join(x for x in (lab.get("nvidia.com/cuda.runtime.major"), lab.get("nvidia.com/cuda.runtime.minor")) if x)
+            gpus.append({"vendor": "NVIDIA", "product": lab.get("nvidia.com/gpu.product", "NVIDIA GPU").replace("-", " "),
+                         "count": to_int(cap.get("nvidia.com/gpu")) or to_int(lab.get("nvidia.com/gpu.count")),
+                         "healthy": to_int(alloc.get("nvidia.com/gpu")), "memoryMiB": to_int(lab.get("nvidia.com/gpu.memory")),
+                         "driver": drv, "runtime": ("CUDA " + rt) if rt else ""})
+        if "habana.ai/gaudi" in cap:
+            drv = next((v for k, v in lab.items() if k.startswith("habana.ai/") and "driver" in k), "")
+            gpus.append({"vendor": "Intel", "product": "Intel Gaudi 3", "count": to_int(cap.get("habana.ai/gaudi")),
+                         "healthy": to_int(alloc.get("habana.ai/gaudi")), "memoryMiB": 131072, "driver": drv, "runtime": ""})
+        if not gpus:
+            continue
+        machine, itype = lab.get("nvidia.com/gpu.machine", ""), lab.get("node.kubernetes.io/instance-type", "")
+        if itype and itype not in machine:
+            machine = f"{machine} ({itype})" if machine else itype
+        ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions", []))
+        nodes.append({"name": n["metadata"]["name"], "short": n["metadata"]["name"].split(".")[0], "ready": ready, "machine": machine,
+                      "zone": lab.get("topology.kubernetes.io/zone", ""), "cpu": cap.get("cpu", ""), "memory": gib(cap.get("memory")),
+                      "os": ni.get("osImage", ""), "kernel": ni.get("kernelVersion", ""),
+                      "runtime": (ni.get("containerRuntimeVersion", "") or "").split("://")[0], "gpus": gpus})
+    pods = []
+    for p in k8s("GET", f"/api/v1/namespaces/{NS}/pods?labelSelector={urllib.parse.quote(SELECTOR)}")["items"]:
+        if p["metadata"].get("deletionTimestamp"):
+            continue
+        lab = p["metadata"].get("labels", {}); ann = p["metadata"].get("annotations", {})
+        c = ms_container(p); full = list(c.get("command") or []) + list(c.get("args") or [])
+        img = c.get("image", "")
+        ver = (re.search(r":v?(\d+\.\d+\.\d+)", img) or [None, ""])[1]
+        try:
+            inp = json.loads(ann.get("llm-d.ai/kv-compat-inputs", "{}"))
+            ver = next((str(v) for k, v in inp.items() if "vllm" in k.lower() and re.match(r"\d", str(v))), ver)
+            backend = next((str(v) for k, v in inp.items() if "backend" in k.lower()), "")
+        except Exception:
+            backend = ""
+        others = [x for x in p["spec"]["containers"] + p["spec"].get("initContainers", []) if x is not c]
+        side = next((x.get("image") for x in others if "sidecar" in (x.get("name", "") + x.get("image", ""))), None)
+        cst = p["status"].get("containerStatuses", [])
+        pods.append({"name": p["metadata"]["name"], "node": p["spec"].get("nodeName", ""), "role": lab.get("llm-d.ai/role", ""),
+                     "cls": lab.get("llm-d.ai/accelerator-class", ""), "image": img, "vllmVersion": ver, "model": pod_model(c),
+                     "maxModelLen": to_int(arg_val(full, "--max-model-len")) or None, "dtype": arg_val(full, "--dtype") or "auto",
+                     "backend": backend, "ready": bool(cst) and all(x.get("ready") for x in cst), "sidecar": side})
+    router = {}
+    try:
+        d = epp_deployment(); cs = d["spec"]["template"]["spec"]["containers"]
+        e = next((c for c in cs if c["name"] == "epp"), cs[0])
+        router = {"image": e.get("image", ""), "configFile": mode_state().get("configFile", ""),
+                  "proxy": next((c.get("image") for c in cs if "envoy" in (c.get("image") or "")), None)}
+    except Exception:
+        pass
+    dt = next((q["dtype"] for q in pods if q.get("dtype")), "auto")
+    data = {"cluster": cluster, "nodes": nodes, "pods": pods, "router": router, "model": {"id": current_model(), "dtype": dt}, "t": time.time()}
+    INV.update(t=time.time(), data=data)
+    return data
+
 # ---------------- traffic ----------------
 SERVICES = ["checkout-api", "payments-gateway", "inventory-sync", "auth-proxy", "search-indexer", "billing-worker", "ledger-db"]
 CHAT_WORDS = ("please help me write a short friendly reply to a customer who asked about their order status "
@@ -125,7 +254,7 @@ class Run:
 def stream(prompt, max_tokens):
     t0 = time.perf_counter(); first = None; times = []; ptoks = None
     conn = http.client.HTTPConnection(ROUTER_HOST, ROUTER_PORT, timeout=180)
-    body = json.dumps({"model": MODEL, "prompt": prompt, "max_tokens": max_tokens, "temperature": 0.7, "stream": True,
+    body = json.dumps({"model": current_model(), "prompt": prompt, "max_tokens": max_tokens, "temperature": 0.7, "stream": True,
                        "stream_options": {"include_usage": True}})
     conn.request("POST", "/v1/completions", body, {"Content-Type": "application/json"})
     r = conn.getresponse()
@@ -164,14 +293,23 @@ def worker(run, kind, rng):
         ttft, itl, n, pt = stream(p, 128 if kind == "chat" else 64)
         with lock:
             run.rec[kind].append((time.time(), ttft, itl, n, pt))
+        return True
     except Exception as ex:
         with lock:
             run.errors += 1; run.last_error = str(ex)[:160]
+        return False
 
 def chat_user(run, seed):
     rng = random.Random(seed)
+    fails = 0
     while run.alive():
-        worker(run, "chat", rng)
+        if worker(run, "chat", rng):
+            fails = 0
+        else:
+            # A real user waits before trying again. Without this, a down server turns 32 users into a
+            # tight retry loop: tens of thousands of errors and no free local ports for anyone.
+            fails += 1
+            time.sleep(min(5.0, 0.5 * fails))
 def doc_feeder(run):
     rng = random.Random(7)
     while run.alive() and run.docs > 0:
@@ -310,6 +448,10 @@ def suite_thread(ids, repeats, minutes, modes):
                     run.stop.set()
                 time.sleep(2)
             SUITE["done"] += 1
+            last = HISTORY[0] if HISTORY else {}
+            if last.get("errors") and not (last.get("chatDone") or last.get("docDone")):
+                SUITE["error"] = "Stopped: every request in the last run failed. " + str(last.get("lastError") or "")[:160]
+                break
         if start_mode in MODES and start_mode != "always" and mode_state().get("current") != start_mode:
             set_mode(start_mode)
     except Exception as ex:
@@ -483,7 +625,7 @@ def card_pods(cls_part):
 def heat_worker(ip, port):
     while not HEAT_STOP.is_set() and time.time() < HEAT["until"]:
         prompt = " ".join(random.choice(WORDS) for _ in range(1000))
-        body = json.dumps({"model": MODEL, "prompt": prompt, "max_tokens": 256, "temperature": 0.8, "ignore_eos": True})
+        body = json.dumps({"model": current_model(), "prompt": prompt, "max_tokens": 256, "temperature": 0.8, "ignore_eos": True})
         try:
             conn = http.client.HTTPConnection(ip, port, timeout=180)
             conn.request("POST", "/v1/completions", body, {"Content-Type": "application/json"})
@@ -595,6 +737,73 @@ def start_heat(b):
                     started=0, until=0, done=0, errors=0, tokens=0, lastErr="")
     threading.Thread(target=heat_thread, args=(target, users, minutes, cards), daemon=True).start()
 
+
+# ---------------- card compatibility (Stack tab): keys, tested pairs, approvals ----------------
+APPROVALS_CM = "kv-compat-approvals"
+COMPAT_LABEL = "llm-d.ai/kv-compat-key"
+ACCEPT_PREFIX = "accept.kv-compat.llm-d.ai/"
+PREFILL_ROLES = {"prefill", "encode-prefill", "prefill-decode", "encode-prefill-decode"}
+DECODE_ROLES = {"decode", "prefill-decode", "encode-prefill-decode"}
+
+
+def compat_state():
+    pods = []
+    for p in k8s("GET", f"/api/v1/namespaces/{NS}/pods?labelSelector={urllib.parse.quote('llm-d.ai/role')}")["items"]:
+        lab = p["metadata"].get("labels", {})
+        ann = p["metadata"].get("annotations", {}) or {}
+        try:
+            inputs = json.loads(ann.get("llm-d.ai/kv-compat-inputs", "") or "null")
+        except ValueError:
+            inputs = None
+        pods.append({"name": p["metadata"]["name"], "role": lab.get("llm-d.ai/role", ""),
+                     "cls": lab.get("llm-d.ai/accelerator-class", ""), "key": lab.get(COMPAT_LABEL, ""),
+                     "accepts": sorted(k[len(ACCEPT_PREFIX):] for k, v in lab.items() if k.startswith(ACCEPT_PREFIX) and v == "true"),
+                     "inputs": inputs, "running": p["status"].get("phase") == "Running"})
+    try:
+        cm = k8s("GET", f"/api/v1/namespaces/{NS}/configmaps/{APPROVALS_CM}")
+        records = []
+        for v in (cm.get("data") or {}).values():
+            try:
+                records.append(json.loads(v))
+            except ValueError:
+                pass
+        installed = True
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        records, installed = [], False
+    same = [{"prefill": a["name"], "decode": b["name"], "prefillClass": a["cls"], "decodeClass": b["cls"], "key": a["key"]}
+            for a in pods for b in pods
+            if a["role"] in PREFILL_ROLES and b["role"] in DECODE_ROLES and a["name"] != b["name"] and a["key"] and a["key"] == b["key"]]
+    live_keys = {p["key"] for p in pods if p["key"]}
+    for r in records:
+        r["live"] = r.get("prefillKey") in live_keys and r.get("decodeKey") in live_keys
+    records.sort(key=lambda r: (not r["live"], r.get("id", "")))
+    return {"installed": installed, "pods": pods, "pairs": records, "sameKey": same}
+
+
+def compat_update(rid, action, who):
+    cm = k8s("GET", f"/api/v1/namespaces/{NS}/configmaps/{APPROVALS_CM}")
+    raw = (cm.get("data") or {}).get(rid)
+    if not raw:
+        raise ValueError("unknown pair")
+    rec = json.loads(raw)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if action == "approve":
+        if rec.get("status") != "passed":
+            raise PermissionError(f"Only a pair whose test passed can be approved (this one: {rec.get('status')}).")
+        rec.update(approved=True, approvedBy=who, approvedAt=now)
+    elif action == "revoke":
+        rec.update(approved=False, revokedBy=who, revokedAt=now)
+    elif action == "retest":
+        if rec.get("status") == "testing":
+            raise PermissionError("A test of this pair is already running.")
+        rec.update(retest=True)
+    else:
+        raise ValueError("unknown action")
+    k8s("PATCH", f"/api/v1/namespaces/{NS}/configmaps/{APPROVALS_CM}",
+        {"data": {rid: json.dumps(rec, sort_keys=True)}}, "application/merge-patch+json")
+
 # ---------------- http ----------------
 class H(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8"}
@@ -616,9 +825,19 @@ class H(SimpleHTTPRequestHandler):
             with lock:
                 run = RUN; hist = list(HISTORY); live = dict(LIVE)
             return self.send_json({"mode": mode_state(), "traffic": summarize(run, window=30) if run else None,
-                                   "trafficTotal": summarize(run) if run else None, "history": hist, "live": live, "model": MODEL,
+                                   "trafficTotal": summarize(run) if run else None, "history": hist, "live": live, "model": current_model(),
                                    "suite": {k: v for k, v in SUITE.items() if k != "stop"},
                                    "scenarios": {k: v["name"] for k, v in SCENARIOS.items()}})
+        if self.path.startswith("/api/inventory"):
+            try:
+                return self.send_json(inventory())
+            except Exception as ex:
+                return self.send_json({"error": str(ex)[:200]}, 500)
+        if self.path.startswith("/api/compat"):
+            try:
+                return self.send_json(compat_state())
+            except Exception as ex:
+                return self.send_json({"error": str(ex)[:200]}, 500)
         if self.path.startswith("/api/hw"):
             with lock:
                 h = dict(HW); ser = {k: thin(v) for k, v in HW["series"].items()}
@@ -636,6 +855,15 @@ class H(SimpleHTTPRequestHandler):
                 if (RUN and RUN.alive()) or SUITE.get("running"):
                     return self.send_json({"error": "Stop the traffic before switching the router."}, 409)
                 set_mode(m); return self.send_json({"ok": True})
+            if self.path in ("/api/compat/approve", "/api/compat/revoke", "/api/compat/retest"):
+                who = self.headers.get("X-Forwarded-User") or self.headers.get("X-Forwarded-Email") or "dashboard"
+                try:
+                    compat_update(str(b.get("id", "")), self.path.rsplit("/", 1)[1], who)
+                except PermissionError as ex:
+                    return self.send_json({"error": str(ex)}, 409)
+                except ValueError as ex:
+                    return self.send_json({"error": str(ex)}, 400)
+                return self.send_json({"ok": True})
             if self.path == "/api/heat/start":
                 if HEAT.get("running"):
                     return self.send_json({"error": "A heat test is already running."}, 409)

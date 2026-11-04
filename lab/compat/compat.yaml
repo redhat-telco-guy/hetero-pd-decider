@@ -1,0 +1,43 @@
+# kv-compat labeler and the pair-validation permissions. Namespace is set by the install script.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kv-compat}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kv-compat}
+rules:
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "patch"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["configmaps"], verbs: ["create"]}
+  - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["kv-compat-results", "kv-compat-approvals"], verbs: ["get", "patch"]}
+  - {apiGroups: ["batch"], resources: ["jobs"], verbs: ["create", "get", "list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kv-compat}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kv-compat}
+subjects: [{kind: ServiceAccount, name: kv-compat}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kv-compat-labeler, labels: {app: kv-compat-labeler}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: kv-compat-labeler}}
+  template:
+    metadata: {labels: {app: kv-compat-labeler}}
+    spec:
+      serviceAccountName: kv-compat
+      containers:
+        - name: labeler
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command: ["python3", "-u", "/app/compat_labeler.py"]
+          env:
+            - {name: SELECTOR, value: "llm-d.ai/role"}
+            - {name: EVERY, value: "30"}
+            - {name: AUTO_TEST, value: "true"}      # test each new pair of keys automatically, one at a time
+            - {name: TEST_PROMPTS, value: "20"}
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: kv-compat-scripts}}]
