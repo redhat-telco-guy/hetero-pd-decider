@@ -17,7 +17,8 @@ router:
           nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/hostname, operator: In, values: ["$NODE"]}]}]
 YAML
 COMMON=$(mktemp); sed "s#svc:5000/hetero-pd-lab#svc:5000/$NS#" $REPO/lab/router/common.values.yaml > $COMMON   # router image lives in this namespace
-ARGS=(upgrade --install $RELEASE $CHART -n $NS -f $COMMON -f $REPO/lab/dashboard2/modes.values.yaml -f $SITE --wait --timeout 6m)
+MODES=${MODES_VALUES:-$REPO/lab/dashboard2/modes.values.yaml}   # MODES_VALUES=<file> for another lab's profiles
+ARGS=(upgrade --install $RELEASE $CHART -n $NS -f $COMMON -f $MODES -f $SITE --wait --timeout 6m)
 # Workaround: the dashboard's mode switch edits the router's --config-file arg; take it back on upgrade.
 helm upgrade --help | grep -q -- --force-conflicts && ARGS+=(--force-conflicts)
 hr "helm ${ARGS[*]:0:3} (pinned llm-d $BASE)"

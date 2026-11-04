@@ -1,0 +1,7 @@
+DEPLOY                IMAGE
+decode-l4             docker.io/vllm/vllm-openai:v0.26.0
+hetero-pd-dashboard   registry.access.redhat.com/ubi9/python-311:latest
+hetero-pd-epp         docker.io/envoyproxy/envoy:distroless-v1.33.2,image-registry.openshift-image-registry.svc:5000/hetero-pd-aws/llm-d-router-endpoint-picker:hetero-pd-dev
+kv-compat-labeler     registry.access.redhat.com/ubi9/python-311:latest
+prefill-a10g          docker.io/vllm/vllm-openai:v0.26.0
+prefill-t4            docker.io/vllm/vllm-openai:v0.26.0

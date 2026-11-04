@@ -4,7 +4,7 @@ source "$(dirname "$0")/lib.sh"; login
 D=$REPO/lab/dashboard2
 oc create configmap hetero-pd-dashboard-web -n $NS --from-file=index.html=$D/web/index.html --from-file=server.py=$D/server.py --dry-run=client -o yaml | oc apply -f -
 # The dashboard manifest avoids the first lab's broken Gaudi node by hostname; drop that rule here.
-sed "s#hetero-pd-lab#$NS#g; s#worker2.ai154.dl154.dfw.ocp.run#no-such-node#" $D/dashboard.yaml | oc apply -n $NS -f -
+sed "s#hetero-pd-lab#$NS#g; s#worker2.ai154.dl154.dfw.ocp.run#no-such-node#; s#Qwen/Qwen2.5-7B-Instruct#$MODEL#" $D/dashboard.yaml | oc apply -n $NS -f -
 oc apply -f - <<YAML
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

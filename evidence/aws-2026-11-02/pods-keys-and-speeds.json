@@ -1,0 +1,113 @@
+[
+  {
+    "pod": "decode-l4-657bd98d57-rn8zd",
+    "role": "decode",
+    "card": "nvidia-l4",
+    "node": "ip-10-0-8-216.us-east-2.compute.internal",
+    "compatKey": "kv-655982265078",
+    "keyInputs": {
+      "backend": "TRITON_ATTN",
+      "block_size": "16",
+      "connector": "NixlConnector",
+      "dtype": "half",
+      "enable_permute_local_kv": false,
+      "image": "docker.io/vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b",
+      "kv_buffer_device": "cpu",
+      "kv_dtype": "auto",
+      "kv_layout_env": {},
+      "model": "Qwen/Qwen2.5-1.5B-Instruct",
+      "pp": "1",
+      "tp": "1",
+      "version": "0.26.0"
+    },
+    "measuredPrefillTokensPerSec": "13193",
+    "speedMeasuredAt": "2026-11-03T01:53:17Z",
+    "image": "docker.io/vllm/vllm-openai:v0.26.0",
+    "args": [
+      "Qwen/Qwen2.5-1.5B-Instruct",
+      "--port=8200",
+      "--dtype=half",
+      "--block-size=16",
+      "--max-model-len=8192",
+      "--gpu-memory-utilization=0.85",
+      "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+      "--attention-backend=TRITON_ATTN",
+      "--kv-transfer-config",
+      "{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}"
+    ]
+  },
+  {
+    "pod": "prefill-a10g-748f77fff6-m7r8n",
+    "role": "prefill",
+    "card": "nvidia-a10g",
+    "node": "ip-10-0-21-40.us-east-2.compute.internal",
+    "compatKey": "kv-655982265078",
+    "keyInputs": {
+      "backend": "TRITON_ATTN",
+      "block_size": "16",
+      "connector": "NixlConnector",
+      "dtype": "half",
+      "enable_permute_local_kv": false,
+      "image": "docker.io/vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b",
+      "kv_buffer_device": "cpu",
+      "kv_dtype": "auto",
+      "kv_layout_env": {},
+      "model": "Qwen/Qwen2.5-1.5B-Instruct",
+      "pp": "1",
+      "tp": "1",
+      "version": "0.26.0"
+    },
+    "measuredPrefillTokensPerSec": "15287",
+    "speedMeasuredAt": "2026-11-03T01:53:47Z",
+    "image": "docker.io/vllm/vllm-openai:v0.26.0",
+    "args": [
+      "Qwen/Qwen2.5-1.5B-Instruct",
+      "--port=8000",
+      "--dtype=half",
+      "--block-size=16",
+      "--max-model-len=8192",
+      "--gpu-memory-utilization=0.85",
+      "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+      "--attention-backend=TRITON_ATTN",
+      "--kv-transfer-config",
+      "{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}"
+    ]
+  },
+  {
+    "pod": "prefill-t4-75c8648cc6-4v6cl",
+    "role": "prefill",
+    "card": "nvidia-t4",
+    "node": "ip-10-0-14-238.us-east-2.compute.internal",
+    "compatKey": "kv-655982265078",
+    "keyInputs": {
+      "backend": "TRITON_ATTN",
+      "block_size": "16",
+      "connector": "NixlConnector",
+      "dtype": "half",
+      "enable_permute_local_kv": false,
+      "image": "docker.io/vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b",
+      "kv_buffer_device": "cpu",
+      "kv_dtype": "auto",
+      "kv_layout_env": {},
+      "model": "Qwen/Qwen2.5-1.5B-Instruct",
+      "pp": "1",
+      "tp": "1",
+      "version": "0.26.0"
+    },
+    "measuredPrefillTokensPerSec": "2151",
+    "speedMeasuredAt": "2026-11-03T01:54:23Z",
+    "image": "docker.io/vllm/vllm-openai:v0.26.0",
+    "args": [
+      "Qwen/Qwen2.5-1.5B-Instruct",
+      "--port=8000",
+      "--dtype=half",
+      "--block-size=16",
+      "--max-model-len=8192",
+      "--gpu-memory-utilization=0.85",
+      "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+      "--attention-backend=TRITON_ATTN",
+      "--kv-transfer-config",
+      "{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}"
+    ]
+  }
+]

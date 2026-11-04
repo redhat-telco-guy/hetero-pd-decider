@@ -1,0 +1,8 @@
+Client Version: 4.14.2
+Kustomize Version: v5.0.1
+Server Version: 4.22.18
+Kubernetes Version: v1.35.8
+
+ip-10-0-14-238.us-east-2.compute.internal   Ready   gpu,nvidia-t4,worker     11h   v1.35.8   Tesla-T4      g4dn.xlarge   595.91.07
+ip-10-0-21-40.us-east-2.compute.internal    Ready   gpu,nvidia-a10g,worker   11h   v1.35.8   NVIDIA-A10G   g5.2xlarge    595.91.07
+ip-10-0-8-216.us-east-2.compute.internal    Ready   gpu,nvidia-l4,worker     11h   v1.35.8   NVIDIA-L4     g6.8xlarge    595.91.07

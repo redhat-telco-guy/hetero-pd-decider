@@ -1,7 +1,7 @@
 # Shared helpers for the A30-only installer. Sourced by every step.
 set -uo pipefail
 A=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); REPO=$(cd "$A/../.." && pwd)
-source "$A/config.env"
+source "${CONFIG:-$A/config.env}"   # CONFIG=<file> reuses these steps for another lab (lab/aws-nvidia)
 hr()   { printf '\n==== %s ====\n' "$1"; }
 die()  { echo "STOP: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is not installed on this computer."; }

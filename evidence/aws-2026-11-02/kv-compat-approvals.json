@@ -1,0 +1,32 @@
+{
+  "kv-655982265078.to.kv-5f50cea6de24": {
+    "approved": false,
+    "decodeClass": "nvidia-l4",
+    "decodeKey": "kv-5f50cea6de24",
+    "decodePod": "decode-l4-5c747dc45-njlqw",
+    "firstSeen": "2026-11-02T17:56:16Z",
+    "id": "kv-655982265078.to.kv-5f50cea6de24",
+    "job": "kv-validate-2c01192fa9",
+    "prefillClass": "nvidia-t4",
+    "prefillKey": "kv-655982265078",
+    "prefillPod": "prefill-t4-999b584b4-vlw87",
+    "result": {
+      "checks": {
+        "first token matches in >= 95% of prompts": false,
+        "no split failures": false,
+        "split agrees at least as long as the prefill card alone (-10%)": true
+      },
+      "compared": 0,
+      "decode": "decode-l4-55bbc74f4-z9xxz",
+      "errors": 20,
+      "first_token_same": 0,
+      "prefill": "prefill-t4-b7c84fdd-llqmz",
+      "prefill_alone_agreement": 0,
+      "split_agreement": 0
+    },
+    "status": "failed",
+    "testStarted": "2026-11-02T17:56:16Z",
+    "testStartedEpoch": 1793642176.094982,
+    "testedAt": "2026-11-02T17:56:52Z"
+  }
+}

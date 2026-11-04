@@ -330,7 +330,7 @@ ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.
         <p class="muted" id="tStatus">No traffic running.</p>
         <div class="prog" id="tProg" hidden><div></div></div>
         <div class="three" style="margin-top:10px">
-          <div class="tile"><div class="v num" id="vMoved">—</div><div class="l">requests moved to the A30, per minute</div></div>
+          <div class="tile"><div class="v num" id="vMoved">—</div><div class="l">requests moved to a reading card, per minute</div></div>
           <div class="tile"><div class="v num" id="vKept">—</div><div class="l">requests kept on the answering card, per minute</div></div>
         </div>
         <div class="split" id="vSplit"><div class="m" style="flex:0"></div><div class="k" style="flex:1"></div></div>
@@ -375,12 +375,12 @@ ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.
         <p class="small muted" id="sumWhy"></p>
       </div>
       <p class="small muted">Medians across repeats. Green is better for your plugin, red is worse.</p>
-      <div class="tablebox"><table id="suiteRes"><thead><tr><th>Scenario</th><th>Moved to A30<br>stock → plugin</th><th>Output tokens/s</th><th>Chat word gap (slowest 5%)</th><th>Chat first words (slowest 5%)</th><th>Doc first words (typical)</th><th>Runs</th><th>Winner</th></tr></thead><tbody></tbody></table></div>
+      <div class="tablebox"><table id="suiteRes"><thead><tr><th>Scenario</th><th>Moved to a reading card<br>stock → plugin</th><th>Output tokens/s</th><th>Chat word gap (slowest 5%)</th><th>Chat first words (slowest 5%)</th><th>Doc first words (typical)</th><th>Runs</th><th>Winner</th></tr></thead><tbody></tbody></table></div>
     </div>
     <div class="panel">
       <h2>Runs so far</h2>
       <div class="actions" style="justify-content:space-between"><p class="small muted" style="margin:0">Every finished run, newest first. Prompt sizes are measured by the model server.</p><button class="btn" id="clearBtn">Clear saved runs</button></div>
-      <div class="tablebox"><table id="runs"><thead><tr><th>Router mode</th><th>Scenario</th><th>Chat users × tokens</th><th>Docs/s × tokens</th><th>Chat first words (slowest 5%)</th><th>Chat word gap (slowest 5%)</th><th>Doc first words</th><th>Moved to A30</th><th>Tokens/s</th><th>Errors</th><th>Winner vs. the other mode</th></tr></thead><tbody></tbody></table></div>
+      <div class="tablebox"><table id="runs"><thead><tr><th>Router mode</th><th>Scenario</th><th>Chat users × tokens</th><th>Docs/s × tokens</th><th>Chat first words (slowest 5%)</th><th>Chat word gap (slowest 5%)</th><th>Doc first words</th><th>Moved to a reading card</th><th>Tokens/s</th><th>Errors</th><th>Winner vs. the other mode</th></tr></thead><tbody></tbody></table></div>
       <p class="small muted" style="margin-top:8px">How the winner is picked: each run is paired with the closest run in the other router mode that has the same scenario and settings. Four numbers are compared: output, chat smoothness, chat first words and document first words. A side wins a number when it is at least 3% better. The side that wins more numbers wins; equal counts are a trade-off.</p>
     </div>
   </section>
@@ -414,7 +414,7 @@ ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.
         <li>When it finishes, come back, pick <b>With your plugin</b>, and run the same settings again.</li>
         <li>Compare the two rows in <b>Runs so far</b>. Smoother chat (lower word gap) and faster documents mean the plugin is helping.</li>
       </ol>
-      <p class="small muted" style="margin-top:10px">Switching restarts the router, so stop any running traffic first. Right now the answering card is the second NVIDIA A30, standing in while the Gaudi server is repaired.</p>
+      <p class="small muted" style="margin-top:10px">Switching restarts the router, so stop any running traffic first. <span id="modeCards"></span></p>
     </div>
   </section>
   <!-- ============ THE STACK ============ -->
@@ -443,7 +443,7 @@ ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.
       <div class="err" id="heatErr"></div>
     </div>
     <div class="hwgrid" id="hwNodes"></div>
-    <div class="panel">
+    <div class="panel" id="hwHist">
       <h2>Last hour</h2>
       <div class="charts">
         <div><h3>Card temperature (°C)</h3><div class="lgd" id="lgTemp"></div><div class="chart" id="chTemp"></div></div>
@@ -451,6 +451,11 @@ ul.vp{margin:0;padding-left:1.2rem;display:grid;gap:8px} ul.vp li{line-height:1.
         <div><h3>Fan speed (average RPM)</h3><div class="lgd" id="lgFan"></div><div class="chart" id="chFan"></div></div>
         <div><h3>Fan control setting (%)</h3><div class="lgd" id="lgZone"></div><div class="chart" id="chZone"></div></div>
       </div>
+    </div>
+    <div class="panel" id="compatPanel">
+      <div class="hwhead"><h2 style="margin:0">Card compatibility</h2><span class="pill p-idle" id="cpState">Loading…</span></div>
+      <p class="muted small" style="margin:6px 0 10px">Two cards can hand a prompt's notes (the KV cache) to each other only when they run the same settings: model, vLLM build, attention method, KV layout. Each model server gets a compatibility key from those settings. <b>Same key:</b> allowed automatically. <b>Different keys:</b> blocked, tested automatically, and allowed only after you approve a passed test. Changes apply within about 30 seconds; the router is not restarted.</p>
+      <div id="cpBody"></div>
     </div>
     <div class="panel">
       <h2>What runs where</h2>
@@ -477,7 +482,7 @@ const esc=s=>String(s);
 // ---------- tabs ----------
 const tabs=[...document.querySelectorAll('nav [role=tab]')];
 function show(id){tabs.forEach(t=>{const on=t.getAttribute('aria-controls')===id;t.setAttribute('aria-selected',on);$(t.getAttribute('aria-controls')).hidden=!on;});
-  if(id==='stack'){invT=0;requestAnimationFrame(()=>{drawStack();loadInv();loadHW();});}
+  if(id==='stack'){invT=0;requestAnimationFrame(()=>{drawStack();loadInv();loadHW();loadCompat();});}
   if(location.hash.slice(1)!==id)history.replaceState(null,'','#'+id);}
 tabs.forEach(t=>t.addEventListener('click',()=>show(t.getAttribute('aria-controls'))));
 document.querySelectorAll('[data-goto]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.goto)));
@@ -643,7 +648,7 @@ function drawSummary(rows,su){
     if(r.v.w==='plugin'||(r.v.w==='tie'&&!r.v.same&&r.v.pw.length)){const li=document.createElement('li');li.textContent=`${r.name}${tag(r)}: ${r.v.pw.join(', ')}.`+(why?` Why: ${why}.`:'');ul1.appendChild(li);}
     if(r.v.w==='stock'||(r.v.w==='tie'&&!r.v.same&&r.v.sw.length)){const li=document.createElement('li');li.textContent=`${r.name}${tag(r)}: ${r.v.sw.join(', ')}.`;ul2.appendChild(li);}});
   [[ul1,'None yet.'],[ul2,'None.']].forEach(([u,t])=>{if(!u.children.length){const li=document.createElement('li');li.className='muted';li.textContent=t;u.appendChild(li);}});
-  $('sumWhy').textContent='Your plugin starts from stock’s answer and overrules it only when the other path is at least 25% cheaper, so where it agrees with stock the results should match. On today’s A30-to-A30 setup both cards read at the same speed, so it mainly overrules wasted handoffs. With the Gaudi in the pool, card speed adds more cases where one path is clearly cheaper. Rows marked “vs Old cost model” are the earlier version, kept for comparison.';
+  $('sumWhy').textContent='Your plugin starts from stock’s answer and overrules it only when the other path is at least 25% cheaper, so where it agrees with stock the results should match. It also never hands work between cards that cannot exchange KV (different compatibility keys, see The stack), while stock does. '+liveCardsText()+' Rows marked “vs Old cost model” are the earlier version, kept for comparison.';
 }
 const med=xs=>{const v=xs.filter(x=>x!=null).sort((a,b)=>a-b);if(!v.length)return null;const m=Math.floor(v.length/2);return v.length%2?v[m]:(v[m-1]+v[m])/2;};
 function drawSuite(){
@@ -673,6 +678,62 @@ function drawSuite(){
 }
 
 
+
+
+// ---------- card compatibility (Stack tab) ----------
+let CPD=null,cpBusy=false;const cpArm={};
+function loadCompat(){if(cpBusy)return;cpBusy=true;api('api/compat').then(j=>{CPD=j;drawCompat();}).catch(e=>{CPD={error:e.message};drawCompat();}).finally(()=>{cpBusy=false;});}
+setInterval(()=>{if(!$('stack').hidden)loadCompat();},10000);
+const shortKey=k=>k?k.replace(/^kv-/,'').slice(0,8):'—';
+const cardName2=c=>({'nvidia-t4':'T4','nvidia-a10g':'A10G','nvidia-l4':'L4','nvidia-a30':'A30','intel-gaudi3':'Gaudi 3'}[c]||c||'?');
+function cpAction(id,action,btn){
+  const k=id+action;
+  if(!cpArm[k]){cpArm[k]=true;btn.textContent='Click again to confirm';setTimeout(()=>{cpArm[k]=false;drawCompat();},4000);return;}
+  cpArm[k]=false;btn.disabled=true;btn.textContent='Saving…';
+  api('api/compat/'+action,{id}).then(()=>setTimeout(loadCompat,800)).catch(e=>{alertBox(e.message);loadCompat();});
+}
+function alertBox(msg){const b=$('cpBody');const d=txt('div',msg,'err');b.prepend(d);setTimeout(()=>d.remove(),6000);}
+function inputsText(i){if(!i)return 'not read yet';return [`model ${i.model}`,`vLLM ${i.version}`,`attention ${i.backend}`,`KV ${i.kv_dtype}, block ${i.block_size}`,`layout ${i.kv_buffer_device||'-'}${i.enable_permute_local_kv?', permute':''}${Object.keys(i.kv_layout_env||{}).length?', '+Object.entries(i.kv_layout_env).map(([a,b])=>a+'='+b).join(' '):''}`,`image ${(i.image||'').split('@').pop().slice(0,19)}`].join(' · ');}
+function drawCompat(){
+  const st=$('cpState'),b=$('cpBody');b.replaceChildren();
+  if(!CPD){return;}
+  if(CPD.error){st.className='pill p-idle';st.textContent='Not available';b.appendChild(txt('p',CPD.error,'muted small'));return;}
+  if(!CPD.installed){st.className='pill p-idle';st.textContent='Not installed';b.appendChild(txt('p','Install the compatibility labeler first: bash lab/compat/60-compat-install.sh <namespace>','small'));return;}
+  const live=CPD.pairs.filter(p=>p.live),waiting=live.filter(p=>p.status==='passed'&&!p.approved).length,testing=live.filter(p=>p.status==='testing').length;
+  st.className='pill '+(waiting?'p-warn':testing?'p-move':'p-ok');st.textContent=waiting?`${waiting} waiting for approval`:testing?'Testing a pair':'Up to date';
+  // servers
+  b.appendChild(txt('div','Model servers and their keys','hwsec'));
+  b.appendChild(tbl(['Server','Card','Role','Key','Settings behind the key'],CPD.pods.map(p=>[p.name,cardName2(p.cls),p.role==='decode'?'writes answers':p.role==='prefill'?'reads prompts':p.role,p.key?shortKey(p.key):'none yet',inputsText(p.inputs)])));
+  // same-key pairs
+  if(CPD.sameKey.length){b.appendChild(txt('div','Allowed automatically (same key)','hwsec'));
+    b.appendChild(txt('p',CPD.sameKey.map(s=>`${cardName2(s.prefillClass)} (${s.prefill}) → ${cardName2(s.decodeClass)} (${s.decode})`).join(' · '),'small'));}
+  // different-key pairs
+  b.appendChild(txt('div','Pairs with different keys','hwsec'));
+  if(!CPD.pairs.length){b.appendChild(txt('p','None: every reading card has the same key as the answering cards.','small muted'));return;}
+  const statusText={untested:'Not tested yet',testing:'Testing…',passed:'Passed',failed:'Failed',error:'Test error'};
+  const statusCls={untested:'p-idle',testing:'p-move',passed:'p-ok',failed:'p-bad',error:'p-warn'};
+  const box=document.createElement('div');box.className='tablebox';const t=document.createElement('table');
+  const hd=document.createElement('tr');['Reads → answers','Test','What the test found','Approval',''].forEach(h=>hd.appendChild(txt('th',h)));
+  const th=document.createElement('thead');th.appendChild(hd);const tb=document.createElement('tbody');
+  CPD.pairs.forEach(p=>{const tr=document.createElement('tr');if(!p.live)tr.style.opacity='.55';
+    const c1=document.createElement('td');c1.append(txt('b',`${cardName2(p.prefillClass)} → ${cardName2(p.decodeClass)}`),document.createElement('br'),txt('span',`${shortKey(p.prefillKey)} → ${shortKey(p.decodeKey)}${p.live?'':' (no longer running)'}`,'small muted'));
+    const c2=document.createElement('td');const pl=document.createElement('span');pl.className='pill '+(statusCls[p.status]||'p-idle');pl.textContent=statusText[p.status]||p.status;c2.appendChild(pl);
+    const r=p.result||{};let found='—';
+    if(p.status==='testing')found=`Running since ${(p.testStarted||'').slice(11,16)} UTC (a few minutes).`;
+    else if(r.note)found=r.note;
+    else if(r.compared===0&&r.errors)found=`All ${r.errors} split requests failed, so nothing could be compared. The answering card most likely refused the hand-off.`;
+    else if(r.compared!=null)found=`${r.errors?r.errors+' split requests failed. ':''}First answer token matched in ${Math.round((r.first_token_same||0)*100)}% of ${r.compared} prompts; answers stayed identical for ${(r.split_agreement||0).toFixed(1)} tokens on average (the reading card on its own: ${(r.prefill_alone_agreement||0).toFixed(1)}).`;
+    const c3=txt('td',found);c3.className='small';
+    const c4=txt('td',p.approved?`Approved by ${p.approvedBy||'?'} ${(p.approvedAt||'').slice(0,16).replace('T',' ')}`:p.status==='passed'?'Waiting for your approval':p.revokedBy?`Revoked by ${p.revokedBy}`:'—');c4.className='small';
+    const c5=document.createElement('td');c5.style.whiteSpace='nowrap';
+    const btn=(label,action)=>{const x=document.createElement('button');x.className='btn';x.textContent=label;x.style.marginRight='6px';x.addEventListener('click',()=>cpAction(p.id,action,x));c5.appendChild(x);};
+    if(p.live&&p.status==='passed'&&!p.approved)btn('Approve','approve');
+    if(p.approved)btn('Revoke','revoke');
+    if(p.live&&p.status!=='testing')btn('Re-test','retest');
+    tr.append(c1,c2,c3,c4,c5);tb.appendChild(tr);});
+  t.append(th,tb);box.appendChild(t);b.appendChild(box);
+  b.appendChild(txt('p','A failed test cannot be approved. A re-test clears the approval until the new result is approved. If a server\'s settings change, it gets a new key and the pair must be tested and approved again.','small muted'));
+}
 
 // ---------- heat test (Stack tab) ----------
 function heatCardsVis(){$('heatCardsL').hidden=$('heatTarget').value==='a30';}
@@ -709,6 +770,8 @@ function tbl(head,rows){const box=document.createElement('div');box.className='t
 function cardStop(c){return c.vendor==='Intel'?80:(c.slowdown||c.maxOp||85);}
 function drawHW(){
   const st=$('hwState'),nodesEl=$('hwNodes'),iss=$('hwIssues');iss.replaceChildren();nodesEl.replaceChildren();
+  const none=!!HWD&&!(HWD.nodes||[]).length&&!(HWD.gaudi||[]).length;$('heatPanel').hidden=none||!HWD;$('hwHist').hidden=none||!HWD;
+  if(none){st.className='pill p-idle';st.textContent='Not installed here';$('hwAge').textContent='';iss.appendChild(txt('li','This cluster has no hardware monitor, so there are no fan, temperature or power readings and no heat test. On cloud machines (AWS, for example) the provider manages cooling. To add it on your own servers: lab/hwmon/53-hw-monitor.sh.'));return;}
   if(!HWD){st.className='pill p-idle';st.textContent=online?'Not available':'Offline';$('hwAge').textContent='';
     iss.appendChild(txt('li','Live hardware readings need the hw-monitor service (lab/hwmon/53-hw-monitor.sh) and the dashboard opened from the cluster.'));return;}
   const issues=[];const now=Date.now()/1000;
@@ -844,6 +907,7 @@ function cuboid(cls,x,y,z,w,h,d,front,top,side){
     face('top',w,d,at(w,d,`rotateX(90deg) translateZ(${h/2}px)`),top),face('bottom',w,d,at(w,d,`rotateX(-90deg) translateZ(${h/2}px)`)));
   return b;}
 const short=img=>img?img.split('/').pop():'—';
+const dtName=d=>({half:'fp16',float16:'fp16',bfloat16:'bf16',bf16:'bf16',fp16:'fp16',float32:'fp32',auto:'precision: auto'}[(d||'').toLowerCase()]||d||'');
 const cardName=p=>/gaudi\s*3|gaudi3/i.test(p||'')?'Intel Gaudi 3':(p||'GPU').replace(/^NVIDIA /,'NVIDIA ');
 function drawStack(){
   const D=INVD&&INVD.nodes&&INVD.nodes.length?INVD:SNAPSHOT;const live=D!==SNAPSHOT;
@@ -857,7 +921,7 @@ function drawStack(){
     const count=Math.max(1,g.count||1);const cw=Math.min(150,(SW-40)/count-16);
     for(let k=0;k<count;k++){const x=cx-SW/2+20+cw/2+k*((SW-40)/count);const down=k>=(g.healthy||0);
       const cls=down?'card-down':g.vendor==='NVIDIA'?'card-nv':'card-gd';
-      w.appendChild(cuboid(cls,x,-12,10,cw,70,22,[txt('b',`${cardName(g.product)} #${k+1}`),txt('span',(gb?gb+' memory · ':'')+(down?'DOWN':'healthy'),'s')]));}
+      w.appendChild(cuboid(cls,x,-12,10,cw,70,22,[txt('b',count>1?`${cardName(g.product)} #${k+1}`:cardName(g.product)),txt('span',(gb?gb+' memory · ':'')+(down?'DOWN':'healthy'),'s')]));}
     // driver layer spans the server
     w.appendChild(cuboid('layer-drv',cx,-SH/2-46,0,SW-30,30,SD-60,[txt('b',`Driver: ${g.vendor} ${g.driver||'?'}`),txt('span',g.runtime||'','s')]));
     // pods on this node, one tower per card
@@ -866,7 +930,7 @@ function drawStack(){
       const job=p.role==='prefill'?'reads prompts':'writes answers';
       w.appendChild(cuboid('layer-rt',x,-SH/2-118,0,cw+8,56,110,[txt('b',`vLLM ${p.vllmVersion||'?'}`),txt('span',job+(p.role==='decode'?' · + llm-d sidecar':''),'s'),txt('span',short(p.image),'s')]));
       const mm=(p.model||D.model.id||'').split('/').pop();
-      w.appendChild(cuboid('layer-model',x,-SH/2-196,0,cw+8,56,110,[txt('b',mm),txt('span',`bf16 · ${p.maxModelLen?fmtN(p.maxModelLen)+'-token context':''}`,'s'),txt('span',p.ready?'serving':'starting','s')]));});
+      w.appendChild(cuboid('layer-model',x,-SH/2-196,0,cw+8,56,110,[txt('b',mm),txt('span',`${dtName(p.dtype||(live?'':'bf16'))||''}${p.maxModelLen?' · '+fmtN(p.maxModelLen)+'-token context':''}`,'s'),txt('span',p.ready?'serving':'starting','s')]));});
   });
   // router in front, centred
   const r=D.router||{};const mode=/auto|guarded|hetero/.test(r.configFile||'')?'your plugin':(r.configFile||'').includes('stock')?'stock rule':(r.configFile||'').includes('always')?'test mode':'';
@@ -878,21 +942,23 @@ function dlist(pairs){const dl=document.createElement('dl');pairs.forEach(([a,b]
 function drawParts(D,live){
   const pw=$('parts');pw.replaceChildren();
   (D.nodes||[]).filter(n=>n.gpus&&n.gpus.length).forEach(n=>{const g=n.gpus[0];const p=document.createElement('div');p.className='panel';
-    p.append(txt('h3',`Server ${n.short}`),dlist([['What it is',n.machine],['GPU cards',`${g.count} × ${cardName(g.product)}${g.memoryMiB?', '+Math.round(g.memoryMiB/1024)+' GB each':''}`],['Cards working',`${g.healthy} of ${g.count}`],['Card driver',`${g.vendor} ${g.driver||'?'}`],['Card runtime',g.runtime],['Operating system',n.os],['Linux kernel',n.kernel],['Container runtime',n.runtime],['Platform',`OpenShift ${D.cluster.openshift||'?'} (Kubernetes ${D.cluster.kubernetes||'?'})`],['CPU and memory',`${n.cpu} cores, ${(n.memory||'').replace('Ki',' KiB').replace('Gi',' GB')}`]]));pw.appendChild(p);});
+    p.append(txt('h3',`Server ${n.short}`),dlist([['What it is',n.machine],['Zone',n.zone||null],['GPU cards',`${g.count} × ${cardName(g.product)}${g.memoryMiB?', '+Math.round(g.memoryMiB/1024)+' GB each':''}`],['Cards working',`${g.healthy} of ${g.count}`],['Card driver',`${g.vendor} ${g.driver||'?'}`],['Card runtime',g.runtime],['Operating system',n.os],['Linux kernel',n.kernel],['Container runtime',n.runtime],['Platform',`OpenShift ${D.cluster.openshift||'?'} (Kubernetes ${D.cluster.kubernetes||'?'})`],['CPU and memory',`${n.cpu} cores, ${(n.memory||'').replace('Ki',' KiB').replace('Gi',' GB')}`]]));pw.appendChild(p);});
   (D.pods||[]).forEach(q=>{const p=document.createElement('div');p.className='panel';
-    p.append(txt('h3',`vLLM server: ${q.role==='prefill'?'reads prompts (prefill)':'writes answers (decode)'}`),dlist([['Runs on',q.node],['Inference engine',`vLLM ${q.vllmVersion||'?'}`],['Container image',q.image],['Helper',q.sidecar?`llm-d routing sidecar (${short(q.sidecar)})`:null],['Model',q.model],['Context window',q.maxModelLen?fmtN(q.maxModelLen)+' tokens':null],['Card class',q.cls],['Status',q.ready?'serving':'starting']]));pw.appendChild(p);});
+    p.append(txt('h3',`vLLM server: ${q.role==='prefill'?'reads prompts (prefill)':'writes answers (decode)'}`),dlist([['Runs on',q.node],['Inference engine',`vLLM ${q.vllmVersion||'?'}`],['Container image',q.image],['Helper',q.sidecar?`llm-d routing sidecar (${short(q.sidecar)})`:null],['Model',q.model],['Context window',q.maxModelLen?fmtN(q.maxModelLen)+' tokens':null],['Card class',q.cls],['Attention method',q.backend||null],['Status',q.ready?'serving':'starting']]));pw.appendChild(p);});
   const r=D.router||{};const rp=document.createElement('div');rp.className='panel';
   rp.append(txt('h3','Router'),dlist([['Software','llm-d router (endpoint picker) with hetero-pd-decider built in'],['Image',r.image],['Decision config',r.configFile],['Front proxy',r.proxy?short(r.proxy):null]]));pw.appendChild(rp);
   const m=D.model||{};const mp=document.createElement('div');mp.className='panel';
   const files=(m.files||[]);const gb=x=>x?(x/1e9).toFixed(2)+' GB':'';
-  mp.append(txt('h3',`AI model: ${m.id||'?'}`),dlist([['Parameters',m.params?(m.params/1e9).toFixed(1)+' billion':'about 7.6 billion'],['Precision','bf16 (2 bytes per weight)'],['Weight files',files.length?`${files.filter(f=>f.name.endsWith('.safetensors')).length} safetensors shards, ${gb(files.filter(f=>f.name.endsWith('.safetensors')).reduce((a,f)=>a+(f.size||0),0))}`:'4 safetensors shards, about 15 GB'],['Tokenizer',files.length?files.filter(f=>/token|vocab|merges/.test(f.name)).map(f=>f.name).join(', '):'tokenizer.json, vocab.json, merges.txt'],['License',m.license]]));
+  mp.append(txt('h3',`AI model: ${m.id||'?'}`),dlist([['Parameters',m.params?(m.params/1e9).toFixed(1)+' billion':(live?null:'about 7.6 billion')],['Precision',dtName(m.dtype)||(live?null:'bf16 (2 bytes per weight)')],['Weight files',files.length?`${files.filter(f=>f.name.endsWith('.safetensors')).length} safetensors shards, ${gb(files.filter(f=>f.name.endsWith('.safetensors')).reduce((a,f)=>a+(f.size||0),0))}`:(live?null:'4 safetensors shards, about 15 GB')],['Tokenizer',files.length?files.filter(f=>/token|vocab|merges/.test(f.name)).map(f=>f.name).join(', '):(live?null:'tokenizer.json, vocab.json, merges.txt')],['Served by',live?(D.pods||[]).length+' model servers':null],['License',m.license]]));
   if(files.length){const ul=document.createElement('ul');ul.className='files';files.forEach(f=>{const li=document.createElement('li');li.textContent=f.name+(f.size?` (${gb(f.size)})`:'');ul.appendChild(li);});mp.appendChild(txt('div','All files in the model repository:','small muted'));mp.appendChild(ul);}
   pw.appendChild(mp);
 }
 window.addEventListener('resize',()=>{if(!$('stack').hidden){drawStack();if(HWD)drawHWCharts();}});
-function nice(p){const c=(p.cls||'').includes('gaudi')?'Intel Gaudi':(p.cls||'').includes('a30')?'NVIDIA A30':(p.cls||'Card');return c+(p.role==='prefill'?' · reads prompts':' · writes answers');}
+function nice(p){const c=cardName2(p.cls);return c+(p.role==='prefill'?' · reads prompts':' · writes answers');}
+function liveCardsText(){const ps=(S&&S.live&&S.live.pods)||[];if(!ps.length)return '';const by=r=>[...new Set(ps.filter(p=>p.role===r).map(p=>cardName2(p.cls)))].join(', ')||'none';return `Cards on this cluster: reading ${by('prefill')}; answering ${by('decode')}; model ${(S&&S.model)||'?'}.`;}
 function td(tr,t){const c=document.createElement('td');c.textContent=t;tr.appendChild(c);}
 function drawLive(){
+  {const mc=$('modeCards');if(mc)mc.textContent=liveCardsText();}
   document.querySelectorAll('[data-offline]').forEach(e=>e.hidden=online);
   const m=S&&S.mode||{},running=!!(S&&S.traffic&&S.traffic.running);
   document.querySelectorAll('[data-modename]').forEach(e=>e.textContent=online?(MODE_NAME[m.current]||'—'):'—');
@@ -1017,7 +1083,7 @@ function drawMeasured(){
   if(mo!=null&&mo>=0.01){const freed=fleet*(1-1/(1+mo)),yearly=freed*(price+pA30)*24*365;
     $('vWorth').textContent=`Measured output gain of ${(mo*100).toFixed(1)}% means the same work on ${freed.toFixed(1)} fewer of ${fmtN(fleet)} answering cards: about $${fmtN(Math.round(yearly/100)*100)} a year at $${price.toFixed(2)} + $${pA30.toFixed(2)} per hour.`;}
   else $('vWorth').textContent=`$0 in hardware savings from this test: output stayed within 1% of stock on identical cards. The value is user-facing: ${best?best.h.top.pct+'% '+PHRASE[best.h.top.k][0]+' in '+nm(best.r).toLowerCase():'no clear win yet'}. Card savings depend on the Gaudi test, where cards read at different speeds. Once a test shows an output gain, this section prices it for your fleet.`;
-  $('vFine').textContent=`How a winner is picked: four numbers are compared per scenario (total output, chat smoothness, chat reply start, document start). A side wins a number when it is at least 3% better; the side with more wins takes the scenario. ${D.minutes}-minute runs, stock and plugin alternated each repeat. Answering card: NVIDIA A30, standing in for the Gaudi.`;
+  $('vFine').textContent=`How a winner is picked: four numbers are compared per scenario (total output, chat smoothness, chat reply start, document start). A side wins a number when it is at least 3% better; the side with more wins takes the scenario. ${D.minutes}-minute runs, stock and plugin alternated each repeat. ${liveCardsText()}`;
 }
 setPreset('busy');drawValue();drawMeasured();
 const start=location.hash.slice(1);if(tabs.some(t=>t.getAttribute('aria-controls')===start))show(start);

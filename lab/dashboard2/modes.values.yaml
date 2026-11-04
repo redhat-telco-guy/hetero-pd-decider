@@ -18,6 +18,7 @@ router:
         - type: prefill-filter
         - type: decode-filter
         - type: max-score-picker
+        - type: hetero-kv-compat-filter   # prefill profile: only pods that can take KV from the chosen decode pod
         - type: disagg-profile-handler
           parameters:
             deciders:
@@ -36,6 +37,11 @@ router:
             avgQueuedPromptTokens: 1024
             fallbackNonCachedTokens: 1024
             strategy: model
+            compatibility: auto           # keys must match (or be approved); no key in a mixed pool = no split
+            compatibilityLabel: llm-d.ai/kv-compat-key
+            approvedPairs: []             # "prefillKey->decodeKey", added only after lab/compat/61-validate-pair.sh passes
+            failureThreshold: 3           # failed handoffs in a row that exclude a pair
+            exclusionSeconds: 600
             profiles:                      # REPLACE with profile_prefill.py output
               nvidia-a30:
                 prefillTokensPerSec: 7035
@@ -45,6 +51,7 @@ router:
         - name: prefill
           plugins:
           - pluginRef: prefill-filter
+          - pluginRef: hetero-kv-compat-filter
           - pluginRef: max-score-picker
           - pluginRef: prefix-cache-scorer
             weight: 2
@@ -71,6 +78,7 @@ router:
         - type: prefill-filter
         - type: decode-filter
         - type: max-score-picker
+        - type: hetero-kv-compat-filter   # prefill profile: only pods that can take KV from the chosen decode pod
         - type: disagg-profile-handler
           parameters:
             deciders:
@@ -89,6 +97,11 @@ router:
             avgQueuedPromptTokens: 1024
             fallbackNonCachedTokens: 1024
             strategy: guarded-stock
+            compatibility: auto           # keys must match (or be approved); no key in a mixed pool = no split
+            compatibilityLabel: llm-d.ai/kv-compat-key
+            approvedPairs: []             # "prefillKey->decodeKey", added only after lab/compat/61-validate-pair.sh passes
+            failureThreshold: 3           # failed handoffs in a row that exclude a pair
+            exclusionSeconds: 600
             stockNonCachedTokens: 1024
             idleRunningRequests: 2
             profiles:                      # REPLACE with profile_prefill.py output
@@ -100,6 +113,7 @@ router:
         - name: prefill
           plugins:
           - pluginRef: prefill-filter
+          - pluginRef: hetero-kv-compat-filter
           - pluginRef: max-score-picker
           - pluginRef: prefix-cache-scorer
             weight: 2
@@ -126,6 +140,7 @@ router:
         - type: prefill-filter
         - type: decode-filter
         - type: max-score-picker
+        - type: hetero-kv-compat-filter   # prefill profile: only pods that can take KV from the chosen decode pod
         - type: disagg-profile-handler
           parameters:
             deciders:
@@ -144,6 +159,11 @@ router:
             avgQueuedPromptTokens: 1024
             fallbackNonCachedTokens: 1024
             strategy: auto
+            compatibility: auto           # keys must match (or be approved); no key in a mixed pool = no split
+            compatibilityLabel: llm-d.ai/kv-compat-key
+            approvedPairs: []             # "prefillKey->decodeKey", added only after lab/compat/61-validate-pair.sh passes
+            failureThreshold: 3           # failed handoffs in a row that exclude a pair
+            exclusionSeconds: 600
             overrideMargin: 0.25         # overrule stock only when the other path is 25% cheaper
             stockNonCachedTokens: 1024
             idleRunningRequests: 2
@@ -156,6 +176,7 @@ router:
         - name: prefill
           plugins:
           - pluginRef: prefill-filter
+          - pluginRef: hetero-kv-compat-filter
           - pluginRef: max-score-picker
           - pluginRef: prefix-cache-scorer
             weight: 2

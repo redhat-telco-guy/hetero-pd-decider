@@ -11,7 +11,9 @@ oc get bc epp-hetero -n $NS >/dev/null 2>&1 || \
 UP=$(mktemp -d); cp $REPO/plugin/llm-d-patch/hetero-pd-decider.patch $UP/
 sed "s/^ARG BASE_COMMIT$/ARG BASE_COMMIT=$BASE/" $REPO/lab/build/epp/Dockerfile > $UP/Dockerfile
 grep -q "ARG BASE_COMMIT=$BASE" $UP/Dockerfile || die "Could not pin BASE_COMMIT in the Dockerfile."
-oc patch bc epp-hetero -n $NS --type=merge -p "{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$NODE\"},\"resources\":{\"limits\":{\"cpu\":\"8\",\"memory\":\"16Gi\"}}}}" >/dev/null
+# BUILD_CPU / BUILD_MEM / BUILD_NODE override the build size and node (small cloud GPU nodes have 4 vCPU).
+NODE=${BUILD_NODE:-$NODE}
+oc patch bc epp-hetero -n $NS --type=merge -p "{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$NODE\"},\"resources\":{\"limits\":{\"cpu\":\"${BUILD_CPU:-8}\",\"memory\":\"${BUILD_MEM:-16Gi}\"}}}}" >/dev/null
 hr "Building at llm-d commit $BASE on $NODE"
 B=$(oc start-build epp-hetero -n $NS --from-dir=$UP -o name); rm -rf $UP
 oc logs -f $B -n $NS 2>&1 | grep -E -- '--- (PASS|FAIL)|^ok|FAIL|error|Pushing|Successfully' 

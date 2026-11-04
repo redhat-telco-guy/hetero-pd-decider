@@ -1,0 +1,7 @@
+kv-compat labeler: namespace hetero-pd-aws, selector llm-d.ai/role, label llm-d.ai/kv-compat-key, every 30s, auto-test on
+decode-l4-657bd98d57-rn8zd: measuring prefill speed for key kv-655982265078
+decode-l4-657bd98d57-rn8zd: llm-d.ai/prefill-tokens-per-sec=13193 for key kv-655982265078 (runs [12620, 13058, 13113, 13193, 13292])
+prefill-a10g-748f77fff6-m7r8n: measuring prefill speed for key kv-655982265078
+prefill-a10g-748f77fff6-m7r8n: llm-d.ai/prefill-tokens-per-sec=15287 for key kv-655982265078 (runs [15019, 15098, 15190, 15287, 15314])
+prefill-t4-75c8648cc6-4v6cl: measuring prefill speed for key kv-655982265078
+prefill-t4-75c8648cc6-4v6cl: llm-d.ai/prefill-tokens-per-sec=2151 for key kv-655982265078 (runs [2133, 2146, 2147, 2151, 2158])

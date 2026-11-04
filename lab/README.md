@@ -53,7 +53,7 @@ git checkout -b hetero-pd-decider $(cat $KIT/../plugin/llm-d-patch/BASE_COMMIT)
 git apply $KIT/../plugin/llm-d-patch/hetero-pd-decider.patch
 
 # Unit tests run in the repo's builder container (no host Go needed).
-make test-filter PATTERN='HeteroPD|TestDecide|TestConfigValidate' TYPE=epp
+make test-filter PATTERN='Hetero|TestDecide|TestConfigValidate|TestMixed|TestCompatible|TestExclusions|TestPairKey' TYPE=epp
 make test-filter PATTERN='Disagg|PrefixBased' TYPE=epp        # existing deciders still pass
 make lint                                                       # repo lint rules
 

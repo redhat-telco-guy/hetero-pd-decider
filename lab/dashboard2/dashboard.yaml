@@ -12,6 +12,7 @@ rules:
   - {apiGroups: ["apps"], resources: ["deployments/scale"], resourceNames: ["decode-gaudi3"], verbs: ["get", "patch"]}
   - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["hetero-pd-dashboard-results"], verbs: ["get", "update"]}
   - {apiGroups: [""], resources: ["configmaps"], verbs: ["create"]}
+  - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["kv-compat-approvals"], verbs: ["get", "patch"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

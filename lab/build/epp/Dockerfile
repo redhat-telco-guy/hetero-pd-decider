@@ -16,11 +16,10 @@ RUN go mod download
 # Vet the touched packages and the EPP entrypoint (catches interface mismatches in the adapter).
 RUN go vet ./pkg/epp/framework/plugins/scheduling/profilehandler/disagg/... ./cmd/epp/...
 
-# New tests + existing deciders (regression check).
-RUN go test -count=1 -cover \
-      -run 'HeteroPD|TestDecide|TestConfigValidate|Disagg|PrefixBased' \
-      ./pkg/epp/framework/plugins/scheduling/profilehandler/disagg/... -v \
-    | grep -E '^(--- (PASS|FAIL)|PASS|FAIL|ok|coverage|panic)|_test.go:[0-9]+'
+# Every test in the disagg package (the plugin's and the existing deciders'). The exit code of
+# go test decides the build; grep only trims the log (sh has no pipefail, so no pipe here).
+RUN go test -count=1 -cover ./pkg/epp/framework/plugins/scheduling/profilehandler/disagg/... -v > /tmp/test.log 2>&1; \
+    rc=$?; grep -E '^(--- (PASS|FAIL)|PASS|FAIL|ok|coverage|panic)|_test.go:[0-9]+' /tmp/test.log; exit $rc
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
       -ldflags="-s -w -X github.com/llm-d/llm-d-router/version.CommitSHA=${BASE_COMMIT}+hetero-pd -X github.com/llm-d/llm-d-router/version.BuildRef=hetero-pd-dev" \

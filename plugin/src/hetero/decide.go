@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
 
 // Reason values explain a Decision. They are used as a metric label.
@@ -44,6 +45,22 @@ const (
 	// stock rule because the other path is cheaper by at least OverrideMargin.
 	ReasonOverrideKeep = "override-keep"
 	ReasonOverrideMove = "override-move"
+	// ReasonNoCompatiblePrefill means prefill pods exist but none may exchange KV with the
+	// decode pod: their compatibility keys differ and the pair is not approved, a key is
+	// missing in a mixed pool, or the pair is excluded after failed handoffs.
+	ReasonNoCompatiblePrefill = "no-compatible-prefill"
+)
+
+// Compatibility modes decide when two pods may exchange KV.
+const (
+	// CompatibilityAuto (default): pods with equal compatibility keys, or an approved key
+	// pair, are compatible. A missing key is accepted only when the pool holds a single
+	// accelerator class; in a mixed pool it means incompatible.
+	CompatibilityAuto = "auto"
+	// CompatibilityStrict requires keys on both pods, equal or approved, in any pool.
+	CompatibilityStrict = "strict"
+	// CompatibilityOff skips the check. Only for pools known to be homogeneous.
+	CompatibilityOff = "off"
 )
 
 // Strategy values select how Decide reaches a decision.
@@ -109,6 +126,18 @@ type Config struct {
 	// OverrideMargin is how much cheaper, as a fraction in [0, 1), the other path must be
 	// before the auto strategy overrules the stock rule.
 	OverrideMargin float64 `json:"overrideMargin"`
+	// Compatibility is CompatibilityAuto (default; empty means auto), CompatibilityStrict
+	// or CompatibilityOff.
+	Compatibility string `json:"compatibility"`
+	// ApprovedPairs lists key pairs that may exchange KV although their keys differ, written
+	// "prefillKey->decodeKey". A pair is directional: it allows that prefill key to send KV to
+	// that decode key only. Add a pair only after it passed a validation run.
+	ApprovedPairs []string `json:"approvedPairs"`
+	// FailureThreshold is how many failed disaggregated requests in a row exclude a prefill/decode
+	// pair. Zero disables exclusion.
+	FailureThreshold int `json:"failureThreshold"`
+	// ExclusionSeconds is how long an excluded pair stays excluded.
+	ExclusionSeconds int `json:"exclusionSeconds"`
 	// Profiles maps accelerator class to its prefill throughput.
 	Profiles map[string]Profile `json:"profiles"`
 }
@@ -130,6 +159,9 @@ func DefaultConfig() Config {
 		OverrideMargin:        0.25,
 		StockNonCachedTokens:  1024,
 		IdleRunningRequests:   2,
+		Compatibility:         CompatibilityAuto,
+		FailureThreshold:      3,
+		ExclusionSeconds:      600,
 		Profiles:              map[string]Profile{},
 	}
 }
@@ -167,6 +199,19 @@ func (c Config) Validate() error {
 		return errors.New("idleRunningRequests cannot be negative")
 	case c.OverrideMargin < 0 || c.OverrideMargin >= 1:
 		return errors.New("overrideMargin must be in [0, 1)")
+	case c.Compatibility != "" && c.Compatibility != CompatibilityAuto && c.Compatibility != CompatibilityStrict && c.Compatibility != CompatibilityOff:
+		return fmt.Errorf("compatibility must be %q, %q or %q", CompatibilityAuto, CompatibilityStrict, CompatibilityOff)
+	case c.FailureThreshold < 0:
+		return errors.New("failureThreshold cannot be negative")
+	case c.ExclusionSeconds < 0:
+		return errors.New("exclusionSeconds cannot be negative")
+	case c.FailureThreshold > 0 && c.ExclusionSeconds == 0:
+		return errors.New("exclusionSeconds must be positive when failureThreshold is set")
+	}
+	for _, pair := range c.ApprovedPairs {
+		if _, _, ok := splitPair(pair); !ok {
+			return fmt.Errorf("approvedPairs entry %q must be \"prefillKey->decodeKey\"", pair)
+		}
 	}
 	for class, p := range c.Profiles {
 		if p.PrefillTokensPerSec <= 0 {
@@ -180,13 +225,23 @@ func (c Config) Validate() error {
 type Pod struct {
 	Name  string
 	Class string
-	// Fingerprint identifies the served model build. Pods with different
-	// non-empty fingerprints never exchange KV.
-	Fingerprint string
-	Running     int
-	Waiting     int
-	KVUsage     float64
-	Disabled    bool
+	// CompatKey identifies everything that decides whether two pods can exchange KV:
+	// model path, vLLM build, attention backend, KV layout, block size, KV dtype and
+	// parallelism. Equal keys are compatible; different keys only through ApprovedPairs.
+	CompatKey string
+	// Accepts lists prefill compatibility keys this pod accepts KV from although they differ
+	// from its own: approvals granted after a validation run, published as pod labels.
+	Accepts []string
+	// PrefillTokensPerSec is this pod's own measured prefill speed, published as a pod label
+	// and re-measured whenever its CompatKey changes. Zero falls back to the class profile.
+	PrefillTokensPerSec float64
+	Running             int
+	Waiting             int
+	KVUsage             float64
+	Disabled            bool
+	// Excluded is set by the caller when this pod, as a prefill source for the decode pod
+	// being decided, is excluded after failed handoffs.
+	Excluded bool
 }
 
 // Decision is the outcome for one request. Seconds fields are zero when not estimated.
@@ -212,6 +267,14 @@ func (c Config) rate(class string) (float64, bool) {
 	return p.PrefillTokensPerSec, ok && p.PrefillTokensPerSec > 0
 }
 
+// podRate is the pod's measured prefill speed when it has one, else its class profile.
+func (c Config) podRate(p Pod) (float64, bool) {
+	if p.PrefillTokensPerSec > 0 {
+		return p.PrefillTokensPerSec, true
+	}
+	return c.rate(p.Class)
+}
+
 func (c Config) bandwidthBytesPerSec(from, to string) float64 {
 	gbps := c.BandwidthGbps
 	if from == to && from != "" && c.SameClassBandwidthGbps > 0 {
@@ -224,8 +287,70 @@ func (c Config) queueSeconds(p Pod, rate float64) float64 {
 	return float64(p.Waiting*c.AvgQueuedPromptTokens) / rate
 }
 
-func compatible(a, b Pod) bool {
-	return a.Fingerprint == "" || b.Fingerprint == "" || a.Fingerprint == b.Fingerprint
+func splitPair(pair string) (string, string, bool) {
+	from, to, ok := strings.Cut(pair, "->")
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+	return from, to, ok && from != "" && to != ""
+}
+
+// Mixed reports whether the pods span more than one accelerator class. A missing class
+// counts as a class value of its own, so a labelled pod next to an unlabelled one is a
+// mixed pool, while a pool with no class labels at all is treated as one class.
+func Mixed(decode Pod, prefill []Pod) bool {
+	for _, p := range prefill {
+		if p.Class != decode.Class {
+			return true
+		}
+	}
+	return false
+}
+
+// Compatible reports whether prefill may send KV to decode under the configured mode.
+// mixed is the result of Mixed for the pool being decided.
+func (c Config) Compatible(prefill, decode Pod, mixed bool) bool {
+	if c.Compatibility == CompatibilityOff {
+		return true
+	}
+	if prefill.CompatKey == "" || decode.CompatKey == "" {
+		return c.Compatibility != CompatibilityStrict && !mixed
+	}
+	if prefill.CompatKey == decode.CompatKey {
+		return true
+	}
+	for _, k := range decode.Accepts {
+		if k == prefill.CompatKey {
+			return true
+		}
+	}
+	for _, pair := range c.ApprovedPairs {
+		if from, to, ok := splitPair(pair); ok && from == prefill.CompatKey && to == decode.CompatKey {
+			return true
+		}
+	}
+	return false
+}
+
+// Eligible reports whether p can prefill for decode: another pod, not disabled, not
+// excluded, and KV-compatible.
+func (c Config) Eligible(p, decode Pod, mixed bool) bool {
+	return p.Name != decode.Name && !p.Disabled && !p.Excluded && c.Compatible(p, decode, mixed)
+}
+
+// firstEligible returns the first eligible prefill pod, or the reason there is none.
+func (c Config) firstEligible(decode Pod, prefill []Pod, mixed bool) (string, string) {
+	others := false
+	for _, p := range prefill {
+		if c.Eligible(p, decode, mixed) {
+			return p.Name, ""
+		}
+		if p.Name != decode.Name && !p.Disabled {
+			others = true
+		}
+	}
+	if others {
+		return "", ReasonNoCompatiblePrefill
+	}
+	return "", ReasonNoPrefillCandidate
 }
 
 // Decide chooses between prefilling uncached tokens on the decode pod and
@@ -264,15 +389,10 @@ func decideAuto(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decisio
 	if decode.KVUsage >= c.MaxDecodeKVUsage {
 		return Decision{Reason: ReasonDecodeKVFull}
 	}
-	first := ""
-	for _, p := range prefill {
-		if eligible(p, decode) {
-			first = p.Name
-			break
-		}
-	}
+	mixed := Mixed(decode, prefill)
+	first, why := c.firstEligible(decode, prefill, mixed)
 	if first == "" {
-		return Decision{Reason: ReasonNoPrefillCandidate}
+		return Decision{Reason: why}
 	}
 	stockMove := uncachedTokens >= c.StockNonCachedTokens
 	d := Decision{Reason: ReasonStockKeep}
@@ -283,12 +403,12 @@ func decideAuto(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decisio
 		d.Reason = ReasonShortPrompt
 		return d
 	}
-	rateD, ok := c.rate(decode.Class)
+	rateD, ok := c.podRate(decode)
 	if !ok {
 		return d
 	}
 	u := float64(uncachedTokens)
-	best, saw := bestRemote(c, u, decode, prefill)
+	best, saw := bestRemote(c, u, decode, prefill, mixed)
 	if !saw {
 		return d
 	}
@@ -313,10 +433,6 @@ func decideAuto(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decisio
 	return d
 }
 
-func eligible(p, decode Pod) bool {
-	return p.Name != decode.Name && !p.Disabled && compatible(p, decode)
-}
-
 // decideGuardedStock applies the stock threshold and vetoes splits that cannot help.
 func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
 	if uncachedTokens < c.StockNonCachedTokens || uncachedTokens <= 0 {
@@ -328,23 +444,18 @@ func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod)
 	if decode.KVUsage >= c.MaxDecodeKVUsage {
 		return Decision{Reason: ReasonDecodeKVFull}
 	}
-	first := ""
-	for _, p := range prefill {
-		if eligible(p, decode) {
-			first = p.Name
-			break
-		}
-	}
+	mixed := Mixed(decode, prefill)
+	first, why := c.firstEligible(decode, prefill, mixed)
 	if first == "" {
-		return Decision{Reason: ReasonNoPrefillCandidate}
+		return Decision{Reason: why}
 	}
 	d := Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
-	rateD, ok := c.rate(decode.Class)
+	rateD, ok := c.podRate(decode)
 	if !ok {
 		return d
 	}
 	u := float64(uncachedTokens)
-	best, saw := bestRemote(c, u, decode, prefill)
+	best, saw := bestRemote(c, u, decode, prefill, mixed)
 	if !saw {
 		return d
 	}
@@ -360,15 +471,15 @@ func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod)
 }
 
 // bestRemote returns the fastest profiled prefill candidate's remote estimate.
-func bestRemote(c Config, u float64, decode Pod, prefill []Pod) (Decision, bool) {
+func bestRemote(c Config, u float64, decode Pod, prefill []Pod, mixed bool) (Decision, bool) {
 	handoff := c.HandoffOverheadMs / 1000
 	best := Decision{RemoteSeconds: math.Inf(1)}
 	saw := false
 	for _, p := range prefill {
-		if !eligible(p, decode) {
+		if !c.Eligible(p, decode, mixed) {
 			continue
 		}
-		rateP, ok := c.rate(p.Class)
+		rateP, ok := c.podRate(p)
 		if !ok {
 			continue
 		}
@@ -398,16 +509,23 @@ func decideModel(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decisi
 	if decode.KVUsage >= c.MaxDecodeKVUsage {
 		return Decision{Reason: ReasonDecodeKVFull}
 	}
-	rateD, ok := c.rate(decode.Class)
+	mixed := Mixed(decode, prefill)
+	first, why := c.firstEligible(decode, prefill, mixed)
+	if first == "" {
+		return Decision{Reason: why}
+	}
+	rateD, ok := c.podRate(decode)
 	if !ok {
-		return Decision{Fallback: true, Reason: ReasonMissingProfile}
+		// Prefill names a compatible pod so the caller's fallback rule never splits
+		// toward a pod that cannot take the KV.
+		return Decision{Fallback: true, Reason: ReasonMissingProfile, Prefill: first}
 	}
 
 	u := float64(uncachedTokens)
 	local := u/rateD + c.queueSeconds(decode, rateD)
 	stall := c.StallFraction * float64(decode.Running) * u / rateD
 
-	best, sawCandidate := bestRemote(c, u, decode, prefill)
+	best, sawCandidate := bestRemote(c, u, decode, prefill, mixed)
 	best.LocalSeconds = local
 	best.StallSeconds = stall
 	if !sawCandidate {

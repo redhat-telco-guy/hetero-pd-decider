@@ -1,23 +1,25 @@
 diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
-index 4a850a42..e6126207 100644
+index 4a850a42..b8e4de01 100644
 --- a/cmd/epp/runner/runner.go
 +++ b/cmd/epp/runner/runner.go
-@@ -705,6 +705,7 @@ func (r *Runner) registerInTreePlugins() {
+@@ -705,6 +705,8 @@ func (r *Runner) registerInTreePlugins() {
  	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
  	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
  	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
 +	fwkplugin.Register(disagg.HeteroPDDeciderPluginType, fwkplugin.StabilityAlpha, disagg.HeteroPDDeciderPluginFactory)
++	fwkplugin.Register(disagg.HeteroKVCompatFilterType, fwkplugin.StabilityAlpha, disagg.HeteroKVCompatFilterFactory)
  	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
  	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, fwkplugin.StabilityBeta, kvcacheutilization.KvCacheUtilizationScorerFactory)
  	fwkplugin.Register(queuedepth.QueueScorerType, fwkplugin.StabilityBeta, queuedepth.QueueScorerFactory)
 diff --git a/deploy/config/hetero-pd-epp-config.yaml b/deploy/config/hetero-pd-epp-config.yaml
 new file mode 100644
-index 00000000..99076de0
+index 00000000..0aa7f238
 --- /dev/null
 +++ b/deploy/config/hetero-pd-epp-config.yaml
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,65 @@
 +# Sample EPP configuration for P/D with prefill and decode pools of different
-+# accelerator classes. Pods carry llm-d.ai/role and llm-d.ai/accelerator-class.
++# accelerator classes. Pods carry llm-d.ai/role, llm-d.ai/accelerator-class and
++# llm-d.ai/kv-compat-key (set by a labeler from the settings that decide KV compatibility).
 +# Profile throughputs are placeholders: measure them for your model and hardware.
 +apiVersion: llm-d.ai/v1
 +kind: EndpointPickerConfig
@@ -31,6 +33,7 @@ index 00000000..99076de0
 +- type: prefill-filter
 +- type: decode-filter
 +- type: max-score-picker
++- type: hetero-kv-compat-filter   # keeps prefill pods that can take KV from the chosen decode pod
 +- type: disagg-profile-handler
 +  parameters:
 +    deciders:
@@ -49,6 +52,10 @@ index 00000000..99076de0
 +    stallFraction: 0.1             # chunked prefill: running streams lose ~10% of a local prefill
 +    fallbackNonCachedTokens: 1024
 +    strategy: auto                 # auto | model | guarded-stock
++    compatibility: auto            # pods with a different llm-d.ai/kv-compat-key never pair, unless approved
++    approvedPairs: []              # "prefillKey->decodeKey", only after the pair passed a validation run
++    failureThreshold: 3            # failed handoffs in a row that exclude a pair...
++    exclusionSeconds: 600          # ...for this long
 +    overrideMargin: 0.25           # auto overrules stock only when the other path is 25% cheaper
 +    stockNonCachedTokens: 1024
 +    idleRunningRequests: 2
@@ -61,6 +68,7 @@ index 00000000..99076de0
 +- name: prefill
 +  plugins:
 +  - pluginRef: prefill-filter
++  - pluginRef: hetero-kv-compat-filter
 +  - pluginRef: max-score-picker
 +  - pluginRef: prefix-cache-scorer
 +    weight: 2
@@ -75,7 +83,7 @@ index 00000000..99076de0
 +  - pluginRef: queue-scorer
 +    weight: 1
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
-index 1ced7fac..b4eed63e 100644
+index 1ced7fac..84f91366 100644
 --- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md
 @@ -9,6 +9,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
@@ -86,7 +94,7 @@ index 1ced7fac..b4eed63e 100644
    - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
  
  ---
-@@ -168,6 +169,84 @@ None.
+@@ -168,6 +169,112 @@ None.
  
  ---
  
@@ -126,7 +134,27 @@ index 1ced7fac..b4eed63e 100644
 +- `PrefixCacheMatchInfo` on the decode endpoint, to subtract cached tokens. Missing info is treated as no cached prefix.
 +- Tokenized prompt length.
 +- Endpoint metrics: running requests, waiting queue size, KV cache usage.
-+- Pod labels: accelerator class, model fingerprint, disable flag.
++- Pod labels: accelerator class, KV compatibility key, disable flag.
++
++#### KV compatibility
++
++A split only works when the two pods can exchange KV: vLLM's NIXL handshake rejects pods that differ in model path, attention backend, KV layout and similar settings, and some layout mismatches produce wrong output instead of an error. The decider therefore treats compatibility as a hard rule, not a cost:
++
++- Pods carry a compatibility key in `compatibilityLabel`. Equal keys are compatible; different keys only through an approval, in one direction (prefill key to decode key), granted after the pair passed a validation run. Approvals come from `approvedPairs` entries `"prefillKey->decodeKey"` in the config, or live from labels `<acceptLabelPrefix><prefillKey>=true` on decode pods, which an approval controller can set and remove without restarting the router.
++- `compatibility: auto` (default): a missing key is accepted in a pool with one accelerator class, and treated as incompatible when the pool mixes classes. `strict` requires keys everywhere; `off` skips the check.
++- When prefill pods exist but none is compatible, the request stays local with reason `no-compatible-prefill`.
++- Failed handoffs exclude a pair: the plugin remembers which prefill/decode pair served each split request (`PreRequest`), counts a non-200 status or an error end of stream as a failure, and after `failureThreshold` failures in a row excludes the pair for `exclusionSeconds` (`llm_d_epp_hetero_pd_pair_exclusions_total`). A status code cannot tell a rejected handshake from other failures on that path; the threshold keeps one-off errors from excluding a pair.
++
++Add `hetero-kv-compat-filter` to the `prefill` scheduling profile so the prefill pod is picked with the same rule. It reads the decode pick that `disagg-profile-handler` publishes and keeps only compatible prefill endpoints, failing closed:
++
++```yaml
++- type: hetero-kv-compat-filter   # parameters: decider (default hetero-pd-decider)
++...
++schedulingProfiles:
++- name: prefill
++  plugins:
++  - pluginRef: prefill-filter
++  - pluginRef: hetero-kv-compat-filter
 +
 +#### Configuration
 +
@@ -136,7 +164,15 @@ index 1ced7fac..b4eed63e 100644
 +| --- | --- | --- |
 +| `profiles` | none | Map of accelerator class to `{prefillTokensPerSec}`. |
 +| `acceleratorLabel` | `llm-d.ai/accelerator-class` | Pod label holding the accelerator class. |
-+| `fingerprintLabel` | `llm-d.ai/model-fingerprint` | Pods with different non-empty values never exchange KV. Empty disables the check. |
++| `compatibilityLabel` | `llm-d.ai/kv-compat-key` | Pod label holding the KV compatibility key. |
++| `fingerprintLabel` | `llm-d.ai/model-fingerprint` | Read as the compatibility key when a pod has no `compatibilityLabel`. |
++| `compatibility` | `auto` | `auto`, `strict` or `off`; see KV compatibility. |
++| `approvedPairs` | none | Key pairs `"prefillKey->decodeKey"` allowed although the keys differ. |
++| `acceptLabelPrefix` | `accept.kv-compat.llm-d.ai/` | Live approvals: a decode pod labelled `<prefix><prefillKey>=true` accepts KV from that prefill key. Empty disables. |
++| `speedLabel` | `llm-d.ai/prefill-tokens-per-sec` | A pod's own measured prefill speed, read live. It overrides the class profile for that pod, so a change of attention backend, vLLM build or card takes effect without editing `profiles` or restarting the router. A controller re-measures it when the pod's compatibility key changes. Empty disables. |
++| `failureThreshold` | `3` | Failed split requests in a row that exclude a pair. Zero disables exclusion. |
++| `exclusionSeconds` | `600` | How long an excluded pair stays excluded. |
++| `prefillProfile` | `prefill` | Scheduling profile whose pick is the prefill pod, used to track pairs. |
 +| `disableLabel` | `llm-d.ai/hetero-pd-disabled` | A pod with this label set to `true` is excluded as prefill source and as remote-prefill destination. |
 +| `kvBytesPerToken` | `131072` | KV bytes per token across all layers. |
 +| `ttftSLOMs` | `0` | Remote estimates above this are rejected. Zero disables the check. |
@@ -173,10 +209,10 @@ index 1ced7fac..b4eed63e 100644
  **Type:** `always-disagg-multimodal-decider`
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
 new file mode 100644
-index 00000000..68c56b95
+index 00000000..562d9f6c
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide.go
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,548 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -202,6 +238,7 @@ index 00000000..68c56b95
 +	"errors"
 +	"fmt"
 +	"math"
++	"strings"
 +)
 +
 +// Reason values explain a Decision. They are used as a metric label.
@@ -223,6 +260,22 @@ index 00000000..68c56b95
 +	// stock rule because the other path is cheaper by at least OverrideMargin.
 +	ReasonOverrideKeep = "override-keep"
 +	ReasonOverrideMove = "override-move"
++	// ReasonNoCompatiblePrefill means prefill pods exist but none may exchange KV with the
++	// decode pod: their compatibility keys differ and the pair is not approved, a key is
++	// missing in a mixed pool, or the pair is excluded after failed handoffs.
++	ReasonNoCompatiblePrefill = "no-compatible-prefill"
++)
++
++// Compatibility modes decide when two pods may exchange KV.
++const (
++	// CompatibilityAuto (default): pods with equal compatibility keys, or an approved key
++	// pair, are compatible. A missing key is accepted only when the pool holds a single
++	// accelerator class; in a mixed pool it means incompatible.
++	CompatibilityAuto = "auto"
++	// CompatibilityStrict requires keys on both pods, equal or approved, in any pool.
++	CompatibilityStrict = "strict"
++	// CompatibilityOff skips the check. Only for pools known to be homogeneous.
++	CompatibilityOff = "off"
 +)
 +
 +// Strategy values select how Decide reaches a decision.
@@ -288,6 +341,18 @@ index 00000000..68c56b95
 +	// OverrideMargin is how much cheaper, as a fraction in [0, 1), the other path must be
 +	// before the auto strategy overrules the stock rule.
 +	OverrideMargin float64 `json:"overrideMargin"`
++	// Compatibility is CompatibilityAuto (default; empty means auto), CompatibilityStrict
++	// or CompatibilityOff.
++	Compatibility string `json:"compatibility"`
++	// ApprovedPairs lists key pairs that may exchange KV although their keys differ, written
++	// "prefillKey->decodeKey". A pair is directional: it allows that prefill key to send KV to
++	// that decode key only. Add a pair only after it passed a validation run.
++	ApprovedPairs []string `json:"approvedPairs"`
++	// FailureThreshold is how many failed disaggregated requests in a row exclude a prefill/decode
++	// pair. Zero disables exclusion.
++	FailureThreshold int `json:"failureThreshold"`
++	// ExclusionSeconds is how long an excluded pair stays excluded.
++	ExclusionSeconds int `json:"exclusionSeconds"`
 +	// Profiles maps accelerator class to its prefill throughput.
 +	Profiles map[string]Profile `json:"profiles"`
 +}
@@ -309,6 +374,9 @@ index 00000000..68c56b95
 +		OverrideMargin:        0.25,
 +		StockNonCachedTokens:  1024,
 +		IdleRunningRequests:   2,
++		Compatibility:         CompatibilityAuto,
++		FailureThreshold:      3,
++		ExclusionSeconds:      600,
 +		Profiles:              map[string]Profile{},
 +	}
 +}
@@ -346,6 +414,19 @@ index 00000000..68c56b95
 +		return errors.New("idleRunningRequests cannot be negative")
 +	case c.OverrideMargin < 0 || c.OverrideMargin >= 1:
 +		return errors.New("overrideMargin must be in [0, 1)")
++	case c.Compatibility != "" && c.Compatibility != CompatibilityAuto && c.Compatibility != CompatibilityStrict && c.Compatibility != CompatibilityOff:
++		return fmt.Errorf("compatibility must be %q, %q or %q", CompatibilityAuto, CompatibilityStrict, CompatibilityOff)
++	case c.FailureThreshold < 0:
++		return errors.New("failureThreshold cannot be negative")
++	case c.ExclusionSeconds < 0:
++		return errors.New("exclusionSeconds cannot be negative")
++	case c.FailureThreshold > 0 && c.ExclusionSeconds == 0:
++		return errors.New("exclusionSeconds must be positive when failureThreshold is set")
++	}
++	for _, pair := range c.ApprovedPairs {
++		if _, _, ok := splitPair(pair); !ok {
++			return fmt.Errorf("approvedPairs entry %q must be \"prefillKey->decodeKey\"", pair)
++		}
 +	}
 +	for class, p := range c.Profiles {
 +		if p.PrefillTokensPerSec <= 0 {
@@ -359,13 +440,23 @@ index 00000000..68c56b95
 +type Pod struct {
 +	Name  string
 +	Class string
-+	// Fingerprint identifies the served model build. Pods with different
-+	// non-empty fingerprints never exchange KV.
-+	Fingerprint string
-+	Running     int
-+	Waiting     int
-+	KVUsage     float64
-+	Disabled    bool
++	// CompatKey identifies everything that decides whether two pods can exchange KV:
++	// model path, vLLM build, attention backend, KV layout, block size, KV dtype and
++	// parallelism. Equal keys are compatible; different keys only through ApprovedPairs.
++	CompatKey string
++	// Accepts lists prefill compatibility keys this pod accepts KV from although they differ
++	// from its own: approvals granted after a validation run, published as pod labels.
++	Accepts []string
++	// PrefillTokensPerSec is this pod's own measured prefill speed, published as a pod label
++	// and re-measured whenever its CompatKey changes. Zero falls back to the class profile.
++	PrefillTokensPerSec float64
++	Running             int
++	Waiting             int
++	KVUsage             float64
++	Disabled            bool
++	// Excluded is set by the caller when this pod, as a prefill source for the decode pod
++	// being decided, is excluded after failed handoffs.
++	Excluded bool
 +}
 +
 +// Decision is the outcome for one request. Seconds fields are zero when not estimated.
@@ -391,6 +482,14 @@ index 00000000..68c56b95
 +	return p.PrefillTokensPerSec, ok && p.PrefillTokensPerSec > 0
 +}
 +
++// podRate is the pod's measured prefill speed when it has one, else its class profile.
++func (c Config) podRate(p Pod) (float64, bool) {
++	if p.PrefillTokensPerSec > 0 {
++		return p.PrefillTokensPerSec, true
++	}
++	return c.rate(p.Class)
++}
++
 +func (c Config) bandwidthBytesPerSec(from, to string) float64 {
 +	gbps := c.BandwidthGbps
 +	if from == to && from != "" && c.SameClassBandwidthGbps > 0 {
@@ -403,8 +502,70 @@ index 00000000..68c56b95
 +	return float64(p.Waiting*c.AvgQueuedPromptTokens) / rate
 +}
 +
-+func compatible(a, b Pod) bool {
-+	return a.Fingerprint == "" || b.Fingerprint == "" || a.Fingerprint == b.Fingerprint
++func splitPair(pair string) (string, string, bool) {
++	from, to, ok := strings.Cut(pair, "->")
++	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
++	return from, to, ok && from != "" && to != ""
++}
++
++// Mixed reports whether the pods span more than one accelerator class. A missing class
++// counts as a class value of its own, so a labelled pod next to an unlabelled one is a
++// mixed pool, while a pool with no class labels at all is treated as one class.
++func Mixed(decode Pod, prefill []Pod) bool {
++	for _, p := range prefill {
++		if p.Class != decode.Class {
++			return true
++		}
++	}
++	return false
++}
++
++// Compatible reports whether prefill may send KV to decode under the configured mode.
++// mixed is the result of Mixed for the pool being decided.
++func (c Config) Compatible(prefill, decode Pod, mixed bool) bool {
++	if c.Compatibility == CompatibilityOff {
++		return true
++	}
++	if prefill.CompatKey == "" || decode.CompatKey == "" {
++		return c.Compatibility != CompatibilityStrict && !mixed
++	}
++	if prefill.CompatKey == decode.CompatKey {
++		return true
++	}
++	for _, k := range decode.Accepts {
++		if k == prefill.CompatKey {
++			return true
++		}
++	}
++	for _, pair := range c.ApprovedPairs {
++		if from, to, ok := splitPair(pair); ok && from == prefill.CompatKey && to == decode.CompatKey {
++			return true
++		}
++	}
++	return false
++}
++
++// Eligible reports whether p can prefill for decode: another pod, not disabled, not
++// excluded, and KV-compatible.
++func (c Config) Eligible(p, decode Pod, mixed bool) bool {
++	return p.Name != decode.Name && !p.Disabled && !p.Excluded && c.Compatible(p, decode, mixed)
++}
++
++// firstEligible returns the first eligible prefill pod, or the reason there is none.
++func (c Config) firstEligible(decode Pod, prefill []Pod, mixed bool) (string, string) {
++	others := false
++	for _, p := range prefill {
++		if c.Eligible(p, decode, mixed) {
++			return p.Name, ""
++		}
++		if p.Name != decode.Name && !p.Disabled {
++			others = true
++		}
++	}
++	if others {
++		return "", ReasonNoCompatiblePrefill
++	}
++	return "", ReasonNoPrefillCandidate
 +}
 +
 +// Decide chooses between prefilling uncached tokens on the decode pod and
@@ -443,15 +604,10 @@ index 00000000..68c56b95
 +	if decode.KVUsage >= c.MaxDecodeKVUsage {
 +		return Decision{Reason: ReasonDecodeKVFull}
 +	}
-+	first := ""
-+	for _, p := range prefill {
-+		if eligible(p, decode) {
-+			first = p.Name
-+			break
-+		}
-+	}
++	mixed := Mixed(decode, prefill)
++	first, why := c.firstEligible(decode, prefill, mixed)
 +	if first == "" {
-+		return Decision{Reason: ReasonNoPrefillCandidate}
++		return Decision{Reason: why}
 +	}
 +	stockMove := uncachedTokens >= c.StockNonCachedTokens
 +	d := Decision{Reason: ReasonStockKeep}
@@ -462,12 +618,12 @@ index 00000000..68c56b95
 +		d.Reason = ReasonShortPrompt
 +		return d
 +	}
-+	rateD, ok := c.rate(decode.Class)
++	rateD, ok := c.podRate(decode)
 +	if !ok {
 +		return d
 +	}
 +	u := float64(uncachedTokens)
-+	best, saw := bestRemote(c, u, decode, prefill)
++	best, saw := bestRemote(c, u, decode, prefill, mixed)
 +	if !saw {
 +		return d
 +	}
@@ -492,10 +648,6 @@ index 00000000..68c56b95
 +	return d
 +}
 +
-+func eligible(p, decode Pod) bool {
-+	return p.Name != decode.Name && !p.Disabled && compatible(p, decode)
-+}
-+
 +// decideGuardedStock applies the stock threshold and vetoes splits that cannot help.
 +func decideGuardedStock(c Config, uncachedTokens int, decode Pod, prefill []Pod) Decision {
 +	if uncachedTokens < c.StockNonCachedTokens || uncachedTokens <= 0 {
@@ -507,23 +659,18 @@ index 00000000..68c56b95
 +	if decode.KVUsage >= c.MaxDecodeKVUsage {
 +		return Decision{Reason: ReasonDecodeKVFull}
 +	}
-+	first := ""
-+	for _, p := range prefill {
-+		if eligible(p, decode) {
-+			first = p.Name
-+			break
-+		}
-+	}
++	mixed := Mixed(decode, prefill)
++	first, why := c.firstEligible(decode, prefill, mixed)
 +	if first == "" {
-+		return Decision{Reason: ReasonNoPrefillCandidate}
++		return Decision{Reason: why}
 +	}
 +	d := Decision{Remote: true, Reason: ReasonStockSplit, Prefill: first}
-+	rateD, ok := c.rate(decode.Class)
++	rateD, ok := c.podRate(decode)
 +	if !ok {
 +		return d
 +	}
 +	u := float64(uncachedTokens)
-+	best, saw := bestRemote(c, u, decode, prefill)
++	best, saw := bestRemote(c, u, decode, prefill, mixed)
 +	if !saw {
 +		return d
 +	}
@@ -539,15 +686,15 @@ index 00000000..68c56b95
 +}
 +
 +// bestRemote returns the fastest profiled prefill candidate's remote estimate.
-+func bestRemote(c Config, u float64, decode Pod, prefill []Pod) (Decision, bool) {
++func bestRemote(c Config, u float64, decode Pod, prefill []Pod, mixed bool) (Decision, bool) {
 +	handoff := c.HandoffOverheadMs / 1000
 +	best := Decision{RemoteSeconds: math.Inf(1)}
 +	saw := false
 +	for _, p := range prefill {
-+		if !eligible(p, decode) {
++		if !c.Eligible(p, decode, mixed) {
 +			continue
 +		}
-+		rateP, ok := c.rate(p.Class)
++		rateP, ok := c.podRate(p)
 +		if !ok {
 +			continue
 +		}
@@ -577,16 +724,23 @@ index 00000000..68c56b95
 +	if decode.KVUsage >= c.MaxDecodeKVUsage {
 +		return Decision{Reason: ReasonDecodeKVFull}
 +	}
-+	rateD, ok := c.rate(decode.Class)
++	mixed := Mixed(decode, prefill)
++	first, why := c.firstEligible(decode, prefill, mixed)
++	if first == "" {
++		return Decision{Reason: why}
++	}
++	rateD, ok := c.podRate(decode)
 +	if !ok {
-+		return Decision{Fallback: true, Reason: ReasonMissingProfile}
++		// Prefill names a compatible pod so the caller's fallback rule never splits
++		// toward a pod that cannot take the KV.
++		return Decision{Fallback: true, Reason: ReasonMissingProfile, Prefill: first}
 +	}
 +
 +	u := float64(uncachedTokens)
 +	local := u/rateD + c.queueSeconds(decode, rateD)
 +	stall := c.StallFraction * float64(decode.Running) * u / rateD
 +
-+	best, sawCandidate := bestRemote(c, u, decode, prefill)
++	best, sawCandidate := bestRemote(c, u, decode, prefill, mixed)
 +	best.LocalSeconds = local
 +	best.StallSeconds = stall
 +	if !sawCandidate {
@@ -609,10 +763,10 @@ index 00000000..68c56b95
 +}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
 new file mode 100644
-index 00000000..ee7e08aa
+index 00000000..2baab8e8
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/decide_test.go
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,619 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -647,6 +801,8 @@ index 00000000..ee7e08aa
 +func labConfig() Config {
 +	c := DefaultConfig()
 +	c.Strategy = StrategyModel
++	// The cost-model tests leave KV compatibility out; it has its own tests.
++	c.Compatibility = CompatibilityOff
 +	c.TTFTSLOMs = 1000
 +	c.BandwidthGbps = 25
 +	c.Profiles = map[string]Profile{
@@ -772,18 +928,145 @@ index 00000000..ee7e08aa
 +	assertNear(t, "transfer", d.TransferSeconds, 2000.0*131072/25e9)
 +}
 +
-+func TestDecideFingerprintMismatch(t *testing.T) {
++func TestDecideCompatKeyMismatch(t *testing.T) {
++	c := labConfig()
++	c.Compatibility = CompatibilityAuto
 +	decode := gaudi(40)
-+	decode.Fingerprint = "llama-3.1-8b@abc"
++	decode.CompatKey = "qwen7b|hpu|hetero-layout"
 +	other := a30(0)
-+	other.Fingerprint = "llama-3.1-8b@def"
-+	d := Decide(labConfig(), promptLong, decode, []Pod{other})
-+	if d.Remote || d.Reason != ReasonNoPrefillCandidate {
-+		t.Fatalf("mismatched fingerprints must not split, got %+v", d)
++	other.CompatKey = "qwen7b|flash-attn|hnd"
++	d := Decide(c, promptLong, decode, []Pod{other})
++	if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
++		t.Fatalf("different keys must not split, got %+v", d)
 +	}
-+	other.Fingerprint = decode.Fingerprint
-+	if !Decide(labConfig(), promptLong, decode, []Pod{other}).Remote {
-+		t.Fatal("matching fingerprints should split")
++	c.ApprovedPairs = []string{other.CompatKey + "->" + decode.CompatKey}
++	if !Decide(c, promptLong, decode, []Pod{other}).Remote {
++		t.Fatal("an approved pair should split")
++	}
++	// Approval is directional: the reverse direction stays blocked.
++	rev := Decide(c, promptLong, Pod{Name: "a30-d", Class: classA30, CompatKey: other.CompatKey, Running: 40},
++		[]Pod{{Name: "gaudi-p", Class: classGaudi3, CompatKey: decode.CompatKey}})
++	if rev.Remote || rev.Reason != ReasonNoCompatiblePrefill {
++		t.Fatalf("approval must not apply in reverse, got %+v", rev)
++	}
++	// A live approval on the decode pod works like an approved pair, in one direction.
++	c.ApprovedPairs = nil
++	if Decide(c, promptLong, decode, []Pod{other}).Remote {
++		t.Fatal("without approval different keys must not split")
++	}
++	approved := decode
++	approved.Accepts = []string{"something-else", other.CompatKey}
++	if !Decide(c, promptLong, approved, []Pod{other}).Remote {
++		t.Fatal("a decode pod that accepts the prefill key should split")
++	}
++	other.CompatKey = decode.CompatKey
++	if !Decide(c, promptLong, decode, []Pod{other}).Remote {
++		t.Fatal("equal keys should split")
++	}
++}
++
++func TestMixed(t *testing.T) {
++	a, b := Pod{Name: "a", Class: classA30}, Pod{Name: "b", Class: classA30}
++	if Mixed(a, []Pod{b}) {
++		t.Fatal("one class is not mixed")
++	}
++	if !Mixed(a, []Pod{b, {Name: "g", Class: classGaudi3}}) {
++		t.Fatal("two classes are mixed")
++	}
++	if !Mixed(a, []Pod{{Name: "u"}}) {
++		t.Fatal("a labelled pod next to an unlabelled one is mixed")
++	}
++	if Mixed(Pod{Name: "x"}, []Pod{{Name: "y"}}) {
++		t.Fatal("a pool without class labels is one class")
++	}
++	if Mixed(a, nil) {
++		t.Fatal("no candidates is not mixed")
++	}
++}
++
++func TestCompatibleModes(t *testing.T) {
++	keyed := func(name, class, key string) Pod { return Pod{Name: name, Class: class, CompatKey: key} }
++	tests := []struct {
++		name  string
++		mode  string
++		p, d  Pod
++		mixed bool
++		want  bool
++	}{
++		{"auto, same key", CompatibilityAuto, keyed("p", classA30, "k1"), keyed("d", classGaudi3, "k1"), true, true},
++		{"auto, different keys", CompatibilityAuto, keyed("p", classA30, "k1"), keyed("d", classA30, "k2"), false, false},
++		{"auto, missing key, one class", CompatibilityAuto, keyed("p", classA30, ""), keyed("d", classA30, ""), false, true},
++		{"auto, missing key, mixed pool", CompatibilityAuto, keyed("p", classA30, ""), keyed("d", classGaudi3, "k1"), true, false},
++		{"empty mode is auto", "", keyed("p", classA30, ""), keyed("d", classGaudi3, ""), true, false},
++		{"strict, missing key, one class", CompatibilityStrict, keyed("p", classA30, ""), keyed("d", classA30, "k1"), false, false},
++		{"strict, same key", CompatibilityStrict, keyed("p", classA30, "k1"), keyed("d", classA30, "k1"), false, true},
++		{"off, different keys", CompatibilityOff, keyed("p", classA30, "k1"), keyed("d", classGaudi3, "k2"), true, true},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			c := DefaultConfig()
++			c.Compatibility = tt.mode
++			if got := c.Compatible(tt.p, tt.d, tt.mixed); got != tt.want {
++				t.Fatalf("Compatible = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
++
++// A mixed pool without compatibility keys never splits, whatever the strategy, so a
++// pair that cannot exchange KV never reaches a handshake.
++func TestDecideMixedPoolWithoutKeysKeepsLocal(t *testing.T) {
++	for _, strategy := range []string{StrategyAuto, StrategyModel, StrategyGuardedStock} {
++		t.Run(strategy, func(t *testing.T) {
++			c := labConfig()
++			c.Compatibility = CompatibilityAuto
++			c.Strategy = strategy
++			c.StockNonCachedTokens = 1024
++			d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)})
++			if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
++				t.Fatalf("got %+v", d)
++			}
++		})
++	}
++}
++
++func TestDecideExcludedPairIsNotACandidate(t *testing.T) {
++	c := labConfig()
++	p := a30(0)
++	p.Excluded = true
++	d := Decide(c, promptLong, gaudi(40), []Pod{p})
++	if d.Remote || d.Reason != ReasonNoCompatiblePrefill {
++		t.Fatalf("an excluded pair must not be used, got %+v", d)
++	}
++	other := Pod{Name: "a30-1", Class: classA30}
++	if d := Decide(c, promptLong, gaudi(40), []Pod{p, other}); !d.Remote || d.Prefill != "a30-1" {
++		t.Fatalf("want the remaining pod, got %+v", d)
++	}
++}
++
++func TestDecideModelFallbackNamesCompatiblePod(t *testing.T) {
++	c := labConfig()
++	delete(c.Profiles, classGaudi3)
++	d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)})
++	if !d.Fallback || d.Prefill != "a30-0" {
++		t.Fatalf("fallback should name the compatible pod, got %+v", d)
++	}
++	c.Compatibility = CompatibilityAuto
++	if d := Decide(c, promptLong, gaudi(40), []Pod{a30(0)}); d.Fallback || d.Reason != ReasonNoCompatiblePrefill {
++		t.Fatalf("without a compatible pod there is nothing to fall back to, got %+v", d)
++	}
++}
++
++func TestDecideNoCandidateVersusNoCompatible(t *testing.T) {
++	c := labConfig()
++	c.Compatibility = CompatibilityAuto
++	if d := Decide(c, promptLong, gaudi(40), nil); d.Reason != ReasonNoPrefillCandidate {
++		t.Fatalf("no pods at all: got %q", d.Reason)
++	}
++	off := a30(0)
++	off.Disabled = true
++	if d := Decide(c, promptLong, gaudi(40), []Pod{off}); d.Reason != ReasonNoPrefillCandidate {
++		t.Fatalf("only a disabled pod: got %q", d.Reason)
 +	}
 +}
 +
@@ -819,6 +1102,12 @@ index 00000000..ee7e08aa
 +		func(c *Config) { c.IdleRunningRequests = -1 },
 +		func(c *Config) { c.OverrideMargin = 1 },
 +		func(c *Config) { c.OverrideMargin = -0.1 },
++		func(c *Config) { c.Compatibility = "loose" },
++		func(c *Config) { c.ApprovedPairs = []string{"k1"} },
++		func(c *Config) { c.ApprovedPairs = []string{"->k2"} },
++		func(c *Config) { c.FailureThreshold = -1 },
++		func(c *Config) { c.ExclusionSeconds = -1 },
++		func(c *Config) { c.FailureThreshold, c.ExclusionSeconds = 3, 0 },
 +	}
 +	for i, mutate := range bad {
 +		c := labConfig()
@@ -911,6 +1200,7 @@ index 00000000..ee7e08aa
 +func calibratedA30Pair(strategy string) (Config, Pod, Pod) {
 +	c := DefaultConfig()
 +	c.Strategy = strategy
++	c.Compatibility = CompatibilityOff // cost-model tests; compatibility has its own tests
 +	c.KVBytesPerToken = 57344
 +	c.TTFTSLOMs = 1000
 +	c.BandwidthGbps = 10
@@ -1069,12 +1359,385 @@ index 00000000..ee7e08aa
 +		t.Fatalf("got %+v", d)
 +	}
 +}
++
++func TestDecideModelUnprofiledCandidateKeepsLocal(t *testing.T) {
++	c := labConfig()
++	d := Decide(c, promptLong, gaudi(40), []Pod{{Name: "mi300", Class: "amd-mi300x"}})
++	if d.Remote || d.Reason != ReasonNoPrefillCandidate {
++		t.Fatalf("an unprofiled candidate cannot be priced, got %+v", d)
++	}
++}
++
++func TestDecideMeasuredSpeedOverridesProfile(t *testing.T) {
++	c := labConfig()
++	slow := Pod{Name: "a30-slow", Class: classA30, PrefillTokensPerSec: 1000}
++	fast := Pod{Name: "a30-fast", Class: classA30, PrefillTokensPerSec: 9000}
++	d := Decide(c, promptLong, gaudi(40), []Pod{slow, fast})
++	if !d.Remote || d.Prefill != "a30-fast" {
++		t.Fatalf("want split to the faster measured pod, got %+v", d)
++	}
++	// A measured decode speed replaces a missing class profile.
++	dec := Pod{Name: "x", Class: "unknown", Running: 40, PrefillTokensPerSec: 20000}
++	if d := Decide(c, promptLong, dec, []Pod{a30(0)}); d.Reason == ReasonMissingProfile {
++		t.Fatalf("measured decode speed should replace the missing profile: %+v", d)
++	}
++	// Zero means not measured: the class profile is used.
++	if r, ok := c.podRate(Pod{Class: classA30}); !ok || r != 5000 {
++		t.Fatalf("podRate fallback = %v, %v", r, ok)
++	}
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions.go
+new file mode 100644
+index 00000000..037c1c74
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions.go
+@@ -0,0 +1,113 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package hetero
++
++import (
++	"sync"
++	"time"
++)
++
++// PairKey names a prefill/decode pair for exclusion. Pairs with compatibility keys on both
++// sides are tracked by key pair, so a failure caused by configuration excludes every pod
++// pair with the same keys; otherwise by pod names.
++func PairKey(prefill, decode Pod) string {
++	if prefill.CompatKey != "" && decode.CompatKey != "" {
++		return "key:" + prefill.CompatKey + "->" + decode.CompatKey
++	}
++	return "pod:" + prefill.Name + "->" + decode.Name
++}
++
++type pairState struct {
++	failures int
++	until    time.Time
++}
++
++// Exclusions counts consecutive failed handoffs per pair and excludes a pair for a fixed
++// time once the count reaches the threshold. A success resets the count. A failed or
++// rejected handoff is a hard exclusion, not a cost: while a pair is excluded the decider
++// treats it as unable to exchange KV.
++type Exclusions struct {
++	mu        sync.Mutex
++	threshold int
++	ttl       time.Duration
++	pairs     map[string]*pairState
++}
++
++// NewExclusions returns a tracker. A threshold of zero disables exclusion.
++func NewExclusions(threshold int, ttl time.Duration) *Exclusions {
++	return &Exclusions{threshold: threshold, ttl: ttl, pairs: map[string]*pairState{}}
++}
++
++// Record adds the outcome of one disaggregated request for the pair and reports whether
++// this outcome started an exclusion.
++func (e *Exclusions) Record(pair string, ok bool, now time.Time) bool {
++	if e == nil || e.threshold <= 0 {
++		return false
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	st := e.pairs[pair]
++	if ok {
++		if st != nil && !now.Before(st.until) {
++			delete(e.pairs, pair)
++		} else if st != nil {
++			st.failures = 0
++		}
++		return false
++	}
++	if st == nil {
++		st = &pairState{}
++		e.pairs[pair] = st
++	}
++	if now.Before(st.until) {
++		return false
++	}
++	st.failures++
++	if st.failures >= e.threshold {
++		st.failures = 0
++		st.until = now.Add(e.ttl)
++		return true
++	}
++	return false
++}
++
++// Excluded reports whether the pair is excluded at now.
++func (e *Exclusions) Excluded(pair string, now time.Time) bool {
++	if e == nil || e.threshold <= 0 {
++		return false
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	st := e.pairs[pair]
++	return st != nil && now.Before(st.until)
++}
++
++// Active returns the pairs excluded at now.
++func (e *Exclusions) Active(now time.Time) []string {
++	if e == nil {
++		return nil
++	}
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	var out []string
++	for k, st := range e.pairs {
++		if now.Before(st.until) {
++			out = append(out, k)
++		}
++	}
++	return out
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions_test.go
+new file mode 100644
+index 00000000..94c52afb
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero/exclusions_test.go
+@@ -0,0 +1,87 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package hetero
++
++import (
++	"testing"
++	"time"
++)
++
++func TestPairKey(t *testing.T) {
++	p := Pod{Name: "p", CompatKey: "k1"}
++	d := Pod{Name: "d", CompatKey: "k2"}
++	if got := PairKey(p, d); got != "key:k1->k2" {
++		t.Fatalf("keyed pair: %q", got)
++	}
++	d.CompatKey = ""
++	if got := PairKey(p, d); got != "pod:p->d" {
++		t.Fatalf("unkeyed pair: %q", got)
++	}
++}
++
++func TestExclusions(t *testing.T) {
++	t0 := time.Unix(1000, 0)
++	e := NewExclusions(3, time.Minute)
++	pair := "key:a->b"
++	for i := 0; i < 2; i++ {
++		if e.Record(pair, false, t0) {
++			t.Fatalf("failure %d excluded too early", i+1)
++		}
++	}
++	if e.Excluded(pair, t0) {
++		t.Fatal("excluded before the threshold")
++	}
++	if !e.Record(pair, false, t0) {
++		t.Fatal("third failure should start an exclusion")
++	}
++	if !e.Excluded(pair, t0.Add(59*time.Second)) || len(e.Active(t0)) != 1 {
++		t.Fatal("pair should be excluded inside the window")
++	}
++	if e.Record(pair, false, t0.Add(time.Second)) {
++		t.Fatal("failures during an exclusion must not restart it")
++	}
++	e.Record(pair, true, t0.Add(2*time.Second))
++	if !e.Excluded(pair, t0.Add(3*time.Second)) {
++		t.Fatal("a success during the window must not lift the exclusion")
++	}
++	if e.Excluded(pair, t0.Add(time.Minute)) || len(e.Active(t0.Add(time.Minute))) != 0 {
++		t.Fatal("exclusion should end after the TTL")
++	}
++	// After expiry a success clears the state; failures count from zero again.
++	e.Record(pair, true, t0.Add(2*time.Minute))
++	e.Record(pair, false, t0.Add(2*time.Minute))
++	e.Record(pair, true, t0.Add(2*time.Minute))
++	e.Record(pair, false, t0.Add(2*time.Minute))
++	e.Record(pair, false, t0.Add(2*time.Minute))
++	if e.Excluded(pair, t0.Add(2*time.Minute)) {
++		t.Fatal("a success should reset the consecutive count")
++	}
++}
++
++func TestExclusionsDisabled(t *testing.T) {
++	var nilE *Exclusions
++	if nilE.Record("x", false, time.Now()) || nilE.Excluded("x", time.Now()) || nilE.Active(time.Now()) != nil {
++		t.Fatal("nil tracker must be inert")
++	}
++	e := NewExclusions(0, time.Minute)
++	for i := 0; i < 5; i++ {
++		e.Record("x", false, time.Now())
++	}
++	if e.Excluded("x", time.Now()) {
++		t.Fatal("threshold zero disables exclusion")
++	}
++}
+diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_kv_compat_filter.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_kv_compat_filter.go
+new file mode 100644
+index 00000000..1bcaf61f
+--- /dev/null
++++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_kv_compat_filter.go
+@@ -0,0 +1,128 @@
++/*
++Copyright 2026 The llm-d Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package disagg
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"sync"
++
++	"sigs.k8s.io/controller-runtime/pkg/log"
++
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
++)
++
++// HeteroKVCompatFilterType is the type-name of the KV compatibility filter.
++const HeteroKVCompatFilterType = "hetero-kv-compat-filter"
++
++type heteroKVCompatFilterParameters struct {
++	// Decider names the hetero-pd-decider instance whose compatibility rule, approved
++	// pairs and exclusions the filter applies. Defaults to "hetero-pd-decider".
++	Decider string `json:"decider,omitempty"`
++}
++
++var (
++	_ scheduling.Filter     = &HeteroKVCompatFilter{}
++	_ plugin.ConsumerPlugin = &HeteroKVCompatFilter{}
++)
++
++// HeteroKVCompatFilter belongs in the prefill scheduling profile. It keeps only prefill
++// endpoints that may exchange KV with the decode endpoint already picked (published by
++// disagg-profile-handler as the peer endpoint), using the same rule as hetero-pd-decider.
++// A pair that cannot exchange KV is never scheduled, instead of failing at the handshake.
++//
++// It fails closed: when no candidate is compatible it returns none, so the prefill
++// profile fails rather than splitting toward an incompatible pod. hetero-pd-decider only
++// asks for a split when a compatible candidate exists, so this is a safety net.
++// Without a peer endpoint (no disaggregation in progress) candidates pass unchanged.
++type HeteroKVCompatFilter struct {
++	typedName   plugin.TypedName
++	deciderName string
++	handle      plugin.Handle
++	resolveOnce sync.Once
++	decider     *HeteroPDDecider
++}
++
++// HeteroKVCompatFilterFactory creates the filter.
++func HeteroKVCompatFilterFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
++	params := heteroKVCompatFilterParameters{}
++	if rawParameters != nil {
++		if err := rawParameters.Decode(&params); err != nil {
++			return nil, fmt.Errorf("failed to parse the parameters of the '%s' filter - %w", HeteroKVCompatFilterType, err)
++		}
++	}
++	if params.Decider == "" {
++		params.Decider = HeteroPDDeciderPluginType
++	}
++	if name == "" {
++		name = HeteroKVCompatFilterType
++	}
++	return &HeteroKVCompatFilter{
++		typedName:   plugin.TypedName{Type: HeteroKVCompatFilterType, Name: name},
++		deciderName: params.Decider,
++		handle:      handle,
++	}, nil
++}
++
++// TypedName returns the typed name of the filter.
++func (f *HeteroKVCompatFilter) TypedName() plugin.TypedName {
++	return f.typedName
++}
++
++// Consumes declares the peer endpoint published by disagg-profile-handler. It is
++// optional: requests that are not disaggregated carry no peer.
++func (f *HeteroKVCompatFilter) Consumes() plugin.DataDependencies {
++	return plugin.DataDependencies{
++		Optional: map[plugin.DataKey]any{
++			PeerEndpointAttributeKey: scheduling.Endpoint(nil),
++		},
++	}
++}
++
++func (f *HeteroKVCompatFilter) resolve(ctx context.Context) *HeteroPDDecider {
++	f.resolveOnce.Do(func() {
++		if f.decider != nil || f.handle == nil {
++			return
++		}
++		if d, ok := f.handle.Plugin(f.deciderName).(*HeteroPDDecider); ok {
++			f.decider = d
++			return
++		}
++		log.FromContext(ctx).Error(fmt.Errorf("plugin %q is not a %s", f.deciderName, HeteroPDDeciderPluginType),
++			"hetero-kv-compat-filter cannot apply the compatibility rule; prefill candidates pass unfiltered")
++	})
++	return f.decider
++}
++
++// Filter keeps the prefill candidates compatible with the peer decode endpoint.
++func (f *HeteroKVCompatFilter) Filter(ctx context.Context, request *scheduling.InferenceRequest,
++	endpoints []scheduling.Endpoint) []scheduling.Endpoint {
++	if request == nil {
++		return endpoints
++	}
++	peer, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](request, PeerEndpointAttributeKey)
++	if !ok || peer == nil {
++		return endpoints
++	}
++	decider := f.resolve(ctx)
++	if decider == nil {
++		return endpoints
++	}
++	return decider.CompatiblePrefill(peer, endpoints)
++}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
 new file mode 100644
-index 00000000..15047ae1
+index 00000000..cff06f52
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider.go
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,453 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -1098,13 +1761,16 @@ index 00000000..15047ae1
 +	"encoding/json"
 +	"errors"
 +	"fmt"
++	"math"
 +	"strconv"
 +	"sync"
 +	"sync/atomic"
++	"time"
 +
 +	"sigs.k8s.io/controller-runtime/pkg/log"
 +
 +	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 +	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 +	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 +	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -1119,9 +1785,15 @@ index 00000000..15047ae1
 +	// HeteroPDDeciderPluginType is the type-name of the heteroPDDecider plugin.
 +	HeteroPDDeciderPluginType = "hetero-pd-decider"
 +
-+	defaultAcceleratorLabel = "llm-d.ai/accelerator-class"
-+	defaultFingerprintLabel = "llm-d.ai/model-fingerprint"
-+	defaultDisableLabel     = "llm-d.ai/hetero-pd-disabled"
++	defaultAcceleratorLabel   = "llm-d.ai/accelerator-class"
++	defaultCompatibilityLabel = "llm-d.ai/kv-compat-key"
++	defaultFingerprintLabel   = "llm-d.ai/model-fingerprint"
++	defaultDisableLabel       = "llm-d.ai/hetero-pd-disabled"
++	defaultAcceptLabelPrefix  = "accept.kv-compat.llm-d.ai/"
++	defaultSpeedLabel         = "llm-d.ai/prefill-tokens-per-sec"
++
++	// inflightMaxAge bounds how long an unfinished request's pair is remembered.
++	inflightMaxAge = 15 * time.Minute
 +)
 +
 +// HeteroPDDeciderConfig holds the configuration for the heteroPDDecider plugin.
@@ -1131,9 +1803,26 @@ index 00000000..15047ae1
 +
 +	// AcceleratorLabel is the pod label holding the accelerator class used to look up profiles.
 +	AcceleratorLabel string `json:"acceleratorLabel"`
-+	// FingerprintLabel is the pod label identifying the served model build.
-+	// Pods whose values differ never exchange KV. Empty disables the check.
++	// CompatibilityLabel is the pod label holding the KV compatibility key: one value for
++	// everything that decides whether two pods can exchange KV (model path, vLLM build,
++	// attention backend, KV layout, block size, KV dtype, parallelism). See
++	// hetero.Config.Compatibility for how keys are compared.
++	CompatibilityLabel string `json:"compatibilityLabel"`
++	// FingerprintLabel is read as the compatibility key when a pod has no CompatibilityLabel.
++	// Kept for configurations written before CompatibilityLabel existed.
 +	FingerprintLabel string `json:"fingerprintLabel"`
++	// PrefillProfile names the scheduling profile that picks the prefill pod. The plugin
++	// reads its pick after scheduling to learn which pair served a request, so failed
++	// handoffs can exclude that pair.
++	PrefillProfile string `json:"prefillProfile"`
++	// AcceptLabelPrefix marks live approvals: a decode pod labelled <prefix><prefillKey>=true
++	// accepts KV from prefill pods with that compatibility key. An approval controller sets and
++	// removes these labels, so approvals apply without restarting the router. Empty disables.
++	AcceptLabelPrefix string `json:"acceptLabelPrefix"`
++	// SpeedLabel is the pod label holding the pod's own measured prefill speed in tokens per
++	// second. A controller re-measures it whenever the pod's compatibility key changes and the
++	// plugin reads it live; it takes precedence over the class profile. Empty disables.
++	SpeedLabel string `json:"speedLabel"`
 +	// DisableLabel excludes a pod from remote prefill, as source or destination, when set to "true".
 +	DisableLabel string `json:"disableLabel"`
 +	// FallbackNonCachedTokens is the threshold applied when the decode pod's class has no profile.
@@ -1149,7 +1838,11 @@ index 00000000..15047ae1
 +	return HeteroPDDeciderConfig{
 +		Config:                  hetero.DefaultConfig(),
 +		AcceleratorLabel:        defaultAcceleratorLabel,
++		CompatibilityLabel:      defaultCompatibilityLabel,
 +		FingerprintLabel:        defaultFingerprintLabel,
++		PrefillProfile:          defaultPrefillProfile,
++		AcceptLabelPrefix:       defaultAcceptLabelPrefix,
++		SpeedLabel:              defaultSpeedLabel,
 +		DisableLabel:            defaultDisableLabel,
 +		FallbackNonCachedTokens: 1024,
 +	}
@@ -1167,10 +1860,13 @@ index 00000000..15047ae1
 +
 +// compile-time type assertions
 +var (
-+	_ deciderPlugin           = &HeteroPDDecider{}
-+	_ fwkrc.DataProducer      = &HeteroPDDecider{}
-+	_ plugin.ConsumerPlugin   = &HeteroPDDecider{}
-+	_ prefixMatchInfoConsumer = &HeteroPDDecider{}
++	_ deciderPlugin                 = &HeteroPDDecider{}
++	_ fwkrc.DataProducer            = &HeteroPDDecider{}
++	_ fwkrc.PreRequest              = &HeteroPDDecider{}
++	_ fwkrc.ResponseHeaderProcessor = &HeteroPDDecider{}
++	_ fwkrc.ResponseBodyProcessor   = &HeteroPDDecider{}
++	_ plugin.ConsumerPlugin         = &HeteroPDDecider{}
++	_ prefixMatchInfoConsumer       = &HeteroPDDecider{}
 +)
 +
 +var prefillCapableRoles = map[string]struct{}{
@@ -1194,6 +1890,17 @@ index 00000000..15047ae1
 +	prefixMatchInfoDK plugin.DataKey
 +	prefillPods       atomic.Pointer[[]hetero.Pod]
 +	warnNoPrefillView sync.Once
++	// exclusions holds pairs excluded after failed handoffs; inflight maps a request ID
++	// to the pair serving it until the response ends.
++	exclusions *hetero.Exclusions
++	inflight   sync.Map
++	inflightN  atomic.Uint64
++	now        func() time.Time
++}
++
++type inflightPair struct {
++	pair  string
++	start time.Time
 +}
 +
 +// HeteroPDDeciderPluginFactory defines the factory function for creating
@@ -1219,8 +1926,10 @@ index 00000000..15047ae1
 +		return nil, err
 +	}
 +	return &HeteroPDDecider{
-+		typedName: plugin.TypedName{Type: HeteroPDDeciderPluginType},
-+		config:    config,
++		typedName:  plugin.TypedName{Type: HeteroPDDeciderPluginType},
++		config:     config,
++		exclusions: hetero.NewExclusions(config.FailureThreshold, time.Duration(config.ExclusionSeconds)*time.Second),
++		now:        time.Now,
 +		prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(
 +			config.PrefixMatchInfoProducerName,
 +		),
@@ -1283,8 +1992,23 @@ index 00000000..15047ae1
 +	if meta := ep.GetMetadata(); meta != nil {
 +		pod.Name = meta.ID.String()
 +		pod.Class = meta.Labels[d.config.AcceleratorLabel]
-+		if d.config.FingerprintLabel != "" {
-+			pod.Fingerprint = meta.Labels[d.config.FingerprintLabel]
++		if d.config.CompatibilityLabel != "" {
++			pod.CompatKey = meta.Labels[d.config.CompatibilityLabel]
++		}
++		if pod.CompatKey == "" && d.config.FingerprintLabel != "" {
++			pod.CompatKey = meta.Labels[d.config.FingerprintLabel]
++		}
++		if p := d.config.AcceptLabelPrefix; p != "" {
++			for k, v := range meta.Labels {
++				if v == "true" && len(k) > len(p) && k[:len(p)] == p {
++					pod.Accepts = append(pod.Accepts, k[len(p):])
++				}
++			}
++		}
++		if d.config.SpeedLabel != "" {
++			if v, err := strconv.ParseFloat(meta.Labels[d.config.SpeedLabel], 64); err == nil && v > 0 && !math.IsInf(v, 0) {
++				pod.PrefillTokensPerSec = v
++			}
 +		}
 +		if d.config.DisableLabel != "" {
 +			pod.Disabled, _ = strconv.ParseBool(meta.Labels[d.config.DisableLabel])
@@ -1329,9 +2053,16 @@ index 00000000..15047ae1
 +		return false
 +	}
 +
++	decodePod := d.toPod(endpoint)
++	now := d.now()
 +	var prefill []hetero.Pod
 +	if snapshot := d.prefillPods.Load(); snapshot != nil {
-+		prefill = *snapshot
++		// Copy: the snapshot is shared, and exclusion is relative to this decode pod.
++		prefill = make([]hetero.Pod, len(*snapshot))
++		for i, p := range *snapshot {
++			p.Excluded = d.exclusions.Excluded(hetero.PairKey(p, decodePod), now)
++			prefill[i] = p
++		}
 +	} else {
 +		d.warnNoPrefillView.Do(func() {
 +			logger.Info("hetero-pd-decider has no prefill pod view; Produce has not run. " +
@@ -1339,9 +2070,11 @@ index 00000000..15047ae1
 +		})
 +	}
 +
-+	decision := hetero.Decide(d.config.Config, uncached, d.toPod(endpoint), prefill)
++	decision := hetero.Decide(d.config.Config, uncached, decodePod, prefill)
 +	if decision.Fallback {
-+		decision.Remote = d.config.FallbackNonCachedTokens > 0 && uncached >= d.config.FallbackNonCachedTokens
++		// Decide names a compatible prefill pod on fallback; without one, never split.
++		decision.Remote = decision.Prefill != "" && d.config.FallbackNonCachedTokens > 0 &&
++			uncached >= d.config.FallbackNonCachedTokens
 +	}
 +	recordHeteroPDDecision(d.typedName.Name, decision.Reason, decision.Remote)
 +
@@ -1356,12 +2089,114 @@ index 00000000..15047ae1
 +	}
 +	return decision.Remote
 +}
++
++// CompatiblePrefill returns the candidates that may prefill for decode: the same rule the
++// decider applies when pricing (compatibility keys, approved pairs, exclusions, disable
++// label). The kv-compat filter calls it so the prefill profile can only pick a pod the
++// decider would accept. It fails closed: an empty result means no pod may prefill.
++func (d *HeteroPDDecider) CompatiblePrefill(decode scheduling.Endpoint, candidates []scheduling.Endpoint) []scheduling.Endpoint {
++	decodePod := d.toPod(decode)
++	now := d.now()
++	pods := make([]hetero.Pod, len(candidates))
++	for i, ep := range candidates {
++		pods[i] = d.toPod(ep)
++		pods[i].Excluded = d.exclusions.Excluded(hetero.PairKey(pods[i], decodePod), now)
++	}
++	mixed := hetero.Mixed(decodePod, pods)
++	out := make([]scheduling.Endpoint, 0, len(candidates))
++	for i, ep := range candidates {
++		if d.config.Eligible(pods[i], decodePod, mixed) {
++			out = append(out, ep)
++		}
++	}
++	return out
++}
++
++// PreRequest remembers which prefill/decode pair serves a disaggregated request, so the
++// response can count toward excluding that pair. It never fails the request.
++func (d *HeteroPDDecider) PreRequest(_ context.Context, request *scheduling.InferenceRequest,
++	result *scheduling.SchedulingResult) error {
++	if request == nil || result == nil || d.config.FailureThreshold <= 0 {
++		return nil
++	}
++	decode := result.PrimaryEndpoint()
++	prefill := result.ProfileResults[d.config.PrefillProfile].FirstEndpoint()
++	if decode == nil || prefill == nil {
++		return nil
++	}
++	now := d.now()
++	d.inflight.Store(request.RequestID, inflightPair{pair: hetero.PairKey(d.toPod(prefill), d.toPod(decode)), start: now})
++	if d.inflightN.Add(1)%1024 == 0 {
++		d.inflight.Range(func(k, v any) bool {
++			if now.Sub(v.(inflightPair).start) > inflightMaxAge {
++				d.inflight.Delete(k)
++			}
++			return true
++		})
++	}
++	return nil
++}
++
++// ResponseHeader counts a non-200 status on a disaggregated request as a failed handoff.
++// The status alone cannot tell a rejected KV handshake from other failures on that path;
++// the consecutive-failure threshold keeps one-off errors from excluding a pair.
++func (d *HeteroPDDecider) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest,
++	response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
++	if response == nil {
++		return
++	}
++	status := response.Headers[":status"]
++	if status == "" {
++		status = response.Headers["status"]
++	}
++	if status != "" && status != "200" {
++		d.finish(ctx, requestID(request, response), false)
++	}
++}
++
++// ResponseBody records the outcome when the response ends: a natural end is a success,
++// an error end a failure. Client disconnects and evictions say nothing about the pair.
++func (d *HeteroPDDecider) ResponseBody(ctx context.Context, request *scheduling.InferenceRequest,
++	response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
++	if response == nil || !response.EndOfStream {
++		return
++	}
++	id := requestID(request, response)
++	switch response.TerminationCause {
++	case fwkrc.TerminationCauseNatural, "":
++		d.finish(ctx, id, true)
++	case fwkrc.TerminationCauseError:
++		d.finish(ctx, id, false)
++	default:
++		d.inflight.Delete(id)
++	}
++}
++
++func requestID(request *scheduling.InferenceRequest, response *fwkrc.Response) string {
++	if request != nil && request.RequestID != "" {
++		return request.RequestID
++	}
++	return response.RequestID
++}
++
++func (d *HeteroPDDecider) finish(ctx context.Context, id string, ok bool) {
++	v, found := d.inflight.LoadAndDelete(id)
++	if !found {
++		return
++	}
++	pair := v.(inflightPair).pair
++	if d.exclusions.Record(pair, ok, d.now()) {
++		recordHeteroPDExclusion(d.typedName.Name)
++		log.FromContext(ctx).Info("hetero-pd-decider: excluding prefill/decode pair after failed handoffs",
++			"pair", pair, "failures", d.config.FailureThreshold, "seconds", d.config.ExclusionSeconds)
++	}
++}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
 new file mode 100644
-index 00000000..ff5f5bbb
+index 00000000..24c3a2a7
 --- /dev/null
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/hetero_pd_decider_test.go
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,502 @@
 +/*
 +Copyright 2026 The llm-d Authors.
 +
@@ -1385,6 +2220,7 @@ index 00000000..ff5f5bbb
 +	"encoding/json"
 +	"strings"
 +	"testing"
++	"time"
 +
 +	"github.com/prometheus/client_golang/prometheus/testutil"
 +	"github.com/stretchr/testify/assert"
@@ -1392,6 +2228,7 @@ index 00000000..ff5f5bbb
 +	k8stypes "k8s.io/apimachinery/pkg/types"
 +
 +	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
++	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 +	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 +	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 +	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
@@ -1409,6 +2246,8 @@ index 00000000..ff5f5bbb
 +func heteroLabConfig() HeteroPDDeciderConfig {
 +	c := defaultHeteroPDDeciderConfig()
 +	c.Strategy = hetero.StrategyModel // these tests exercise the cost model directly
++	// KV compatibility has its own tests below; the cost-model tests leave it out.
++	c.Compatibility = hetero.CompatibilityOff
 +	c.TTFTSLOMs = 1000
 +	c.BandwidthGbps = 25
 +	c.Profiles = map[string]hetero.Profile{
@@ -1513,14 +2352,6 @@ index 00000000..ff5f5bbb
 +			pool:    []scheduling.Endpoint{heteroEndpoint("gaudi-1", bylabel.RolePrefillDecode, heteroClassGaudi, 0, 0, 0, nil)},
 +			produce: true,
 +			want:    true,
-+		},
-+		{
-+			name:    "fingerprint mismatch blocks the split",
-+			tokens:  heteroPrompt,
-+			decode:  heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, map[string]string{defaultFingerprintLabel: "a"}),
-+			pool:    []scheduling.Endpoint{heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, map[string]string{defaultFingerprintLabel: "b"})},
-+			produce: true,
-+			want:    false,
 +		},
 +		{
 +			name:    "disabled prefill pod is skipped",
@@ -1641,8 +2472,235 @@ index 00000000..ff5f5bbb
 +func TestHeteroPDDeciderDefaultsToAuto(t *testing.T) {
 +	assert.Equal(t, hetero.StrategyAuto, defaultHeteroPDDeciderConfig().Strategy)
 +}
++
++// compatLabConfig is the lab config with the compatibility rule on.
++func compatLabConfig() HeteroPDDeciderConfig {
++	c := heteroLabConfig()
++	c.Compatibility = hetero.CompatibilityAuto
++	return c
++}
++
++func TestHeteroPDDeciderCompatibility(t *testing.T) {
++	key := func(k string) map[string]string { return map[string]string{defaultCompatibilityLabel: k} }
++	busyGaudi := func(extra map[string]string) scheduling.Endpoint {
++		return heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, extra)
++	}
++	a30With := func(extra map[string]string) scheduling.Endpoint {
++		return heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, extra)
++	}
++	tests := []struct {
++		name     string
++		approved []string
++		decode   scheduling.Endpoint
++		prefill  scheduling.Endpoint
++		want     bool
++	}{
++		{"mixed pool without keys keeps local", nil, busyGaudi(nil), a30With(nil), false},
++		{"equal keys split", nil, busyGaudi(key("k1")), a30With(key("k1")), true},
++		{"different keys keep local", nil, busyGaudi(key("gaudi")), a30With(key("a30")), false},
++		{"approved pair splits", []string{"a30->gaudi"}, busyGaudi(key("gaudi")), a30With(key("a30")), true},
++		{"approval is directional", []string{"gaudi->a30"}, busyGaudi(key("gaudi")), a30With(key("a30")), false},
++		{"live approval label splits", nil,
++			busyGaudi(map[string]string{defaultCompatibilityLabel: "gaudi", defaultAcceptLabelPrefix + "a30": "true"}), a30With(key("a30")), true},
++		{"live approval for another key does not", nil,
++			busyGaudi(map[string]string{defaultCompatibilityLabel: "gaudi", defaultAcceptLabelPrefix + "t4": "true"}), a30With(key("a30")), false},
++		{"live approval label must be true", nil,
++			busyGaudi(map[string]string{defaultCompatibilityLabel: "gaudi", defaultAcceptLabelPrefix + "a30": "false"}), a30With(key("a30")), false},
++		{"legacy fingerprint label is read", nil,
++			busyGaudi(map[string]string{defaultFingerprintLabel: "f"}), a30With(map[string]string{defaultFingerprintLabel: "f"}), true},
++		{"one key missing in a mixed pool keeps local", nil, busyGaudi(key("k1")), a30With(nil), false},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			c := compatLabConfig()
++			c.ApprovedPairs = tt.approved
++			d := newTestHeteroDecider(t, c)
++			ctx := context.Background()
++			require.NoError(t, d.Produce(ctx, nil, []scheduling.Endpoint{tt.decode, tt.prefill}))
++			assert.Equal(t, tt.want, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), tt.decode))
++			got := d.CompatiblePrefill(tt.decode, []scheduling.Endpoint{tt.prefill})
++			assert.Equal(t, tt.want, len(got) == 1, "filter and decider must agree")
++		})
++	}
++}
++
++func TestHeteroPDDeciderFallbackNeedsCompatiblePod(t *testing.T) {
++	d := newTestHeteroDecider(t, compatLabConfig())
++	ctx := context.Background()
++	decode := heteroEndpoint("x-0", bylabel.RoleDecode, "unprofiled", 40, 0, 0.3, nil)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, nil)
++	require.NoError(t, d.Produce(ctx, nil, []scheduling.Endpoint{decode, pool}))
++	assert.False(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode),
++		"the fallback threshold must not split toward an incompatible pod")
++}
++
++func TestHeteroKVCompatFilter(t *testing.T) {
++	d := newTestHeteroDecider(t, compatLabConfig())
++	f := &HeteroKVCompatFilter{typedName: d.TypedName(), decider: d}
++	ctx := context.Background()
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, map[string]string{defaultCompatibilityLabel: "k1"})
++	same := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, map[string]string{defaultCompatibilityLabel: "k1"})
++	other := heteroEndpoint("a30-1", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, map[string]string{defaultCompatibilityLabel: "k2"})
++	pool := []scheduling.Endpoint{same, other}
++
++	req := makeRequestWithTokens(heteroPrompt)
++	assert.Equal(t, pool, f.Filter(ctx, req, pool), "without a peer endpoint candidates pass")
++	assert.Equal(t, pool, f.Filter(ctx, nil, pool))
++
++	req.PutAttribute(PeerEndpointAttributeKey, decode)
++	assert.Equal(t, []scheduling.Endpoint{same}, f.Filter(ctx, req, pool))
++	assert.Empty(t, f.Filter(ctx, req, []scheduling.Endpoint{other}), "fails closed")
++
++	unresolved := &HeteroKVCompatFilter{}
++	assert.Equal(t, pool, unresolved.Filter(ctx, req, pool), "no decider: candidates pass unfiltered")
++	assert.Contains(t, f.Consumes().Optional, PeerEndpointAttributeKey)
++}
++
++func TestHeteroKVCompatFilterFactory(t *testing.T) {
++	p, err := HeteroKVCompatFilterFactory("", nil, nil)
++	require.NoError(t, err)
++	f := p.(*HeteroKVCompatFilter)
++	assert.Equal(t, HeteroKVCompatFilterType, f.TypedName().Name)
++	assert.Equal(t, HeteroPDDeciderPluginType, f.deciderName)
++	p, err = HeteroKVCompatFilterFactory("c", json.NewDecoder(strings.NewReader(`{"decider":"h"}`)), nil)
++	require.NoError(t, err)
++	assert.Equal(t, "h", p.(*HeteroKVCompatFilter).deciderName)
++	_, err = HeteroKVCompatFilterFactory("c", json.NewDecoder(strings.NewReader(`{"decider":1}`)), nil)
++	assert.Error(t, err)
++}
++
++func pdResult(decode, prefill scheduling.Endpoint) *scheduling.SchedulingResult {
++	return &scheduling.SchedulingResult{
++		PrimaryProfileName: "decode",
++		ProfileResults: map[string]*scheduling.ProfileRunResult{
++			"decode":  {TargetEndpoints: []scheduling.Endpoint{decode}},
++			"prefill": {TargetEndpoints: []scheduling.Endpoint{prefill}},
++		},
++	}
++}
++
++func TestHeteroPDDeciderExcludesFailingPair(t *testing.T) {
++	c := compatLabConfig()
++	c.FailureThreshold, c.ExclusionSeconds = 2, 60
++	d := newTestHeteroDecider(t, c)
++	t0 := time.Unix(1000, 0)
++	d.now = func() time.Time { return t0 }
++	ctx := context.Background()
++	k := map[string]string{defaultCompatibilityLabel: "k1"}
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, k)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, k)
++	require.NoError(t, d.Produce(ctx, nil, []scheduling.Endpoint{decode, pool}))
++	require.True(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode))
++
++	exclusions := LlmdHeteroPDExclusionCount.WithLabelValues("hetero")
++	before := testutil.ToFloat64(exclusions)
++	fail := func(id string) {
++		req := makeRequestWithTokens(heteroPrompt)
++		req.RequestID = id
++		require.NoError(t, d.PreRequest(ctx, req, pdResult(decode, pool)))
++		d.ResponseHeader(ctx, req, &fwkrc.Response{Headers: map[string]string{":status": "502"}}, nil)
++		// The end of the same response must not count it twice.
++		d.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true, TerminationCause: fwkrc.TerminationCauseError}, nil)
++	}
++	fail("r1")
++	assert.True(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode), "one failure is below the threshold")
++	fail("r2")
++	assert.InDelta(t, before+1, testutil.ToFloat64(exclusions), 1e-9)
++	assert.False(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode), "excluded pair keeps requests local")
++	assert.Empty(t, d.CompatiblePrefill(decode, []scheduling.Endpoint{pool}), "the filter applies the exclusion too")
++
++	t0 = t0.Add(61 * time.Second)
++	assert.True(t, d.disaggregate(ctx, makeRequestWithTokens(heteroPrompt), decode), "exclusion ends after the TTL")
++}
++
++func TestHeteroPDDeciderResponseOutcomes(t *testing.T) {
++	c := compatLabConfig()
++	c.FailureThreshold, c.ExclusionSeconds = 1, 60
++	d := newTestHeteroDecider(t, c)
++	ctx := context.Background()
++	k := map[string]string{defaultCompatibilityLabel: "k1"}
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, k)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, k)
++	pair := hetero.PairKey(d.toPod(pool), d.toPod(decode))
++	start := func(id string) *scheduling.InferenceRequest {
++		req := makeRequestWithTokens(heteroPrompt)
++		req.RequestID = id
++		require.NoError(t, d.PreRequest(ctx, req, pdResult(decode, pool)))
++		return req
++	}
++
++	// Success: a 200 header, then a natural end.
++	req := start("ok")
++	d.ResponseHeader(ctx, req, &fwkrc.Response{Headers: map[string]string{":status": "200"}}, nil)
++	d.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: false}, nil)
++	d.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true, TerminationCause: fwkrc.TerminationCauseNatural}, nil)
++	_, pending := d.inflight.Load("ok")
++	assert.False(t, pending)
++	assert.False(t, d.exclusions.Excluded(pair, time.Now()))
++
++	// A client disconnect says nothing about the pair.
++	req = start("gone")
++	d.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true, TerminationCause: fwkrc.TerminationCauseClientDisconnect}, nil)
++	_, pending = d.inflight.Load("gone")
++	assert.False(t, pending)
++	assert.False(t, d.exclusions.Excluded(pair, time.Now()))
++
++	// An error end counts, read from the response's ID when the request is absent.
++	start("err")
++	d.ResponseBody(ctx, nil, &fwkrc.Response{RequestID: "err", EndOfStream: true, TerminationCause: fwkrc.TerminationCauseError}, nil)
++	assert.True(t, d.exclusions.Excluded(pair, time.Now()))
++
++	// Decode-only results and nil inputs are ignored.
++	decodeOnly := &scheduling.SchedulingResult{PrimaryProfileName: "decode",
++		ProfileResults: map[string]*scheduling.ProfileRunResult{"decode": {TargetEndpoints: []scheduling.Endpoint{decode}}}}
++	req = makeRequestWithTokens(heteroPrompt)
++	req.RequestID = "local"
++	require.NoError(t, d.PreRequest(ctx, req, decodeOnly))
++	require.NoError(t, d.PreRequest(ctx, nil, decodeOnly))
++	require.NoError(t, d.PreRequest(ctx, req, nil))
++	_, pending = d.inflight.Load("local")
++	assert.False(t, pending)
++	d.ResponseHeader(ctx, req, nil, nil)
++	d.ResponseBody(ctx, req, nil, nil)
++	d.ResponseHeader(ctx, req, &fwkrc.Response{Headers: map[string]string{"status": "503"}}, nil) // unknown ID
++}
++
++func TestHeteroPDDeciderExclusionDisabled(t *testing.T) {
++	c := compatLabConfig()
++	c.FailureThreshold = 0
++	d := newTestHeteroDecider(t, c)
++	ctx := context.Background()
++	k := map[string]string{defaultCompatibilityLabel: "k1"}
++	decode := heteroEndpoint("gaudi-0", bylabel.RoleDecode, heteroClassGaudi, 40, 0, 0.3, k)
++	pool := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, k)
++	req := makeRequestWithTokens(heteroPrompt)
++	req.RequestID = "x"
++	require.NoError(t, d.PreRequest(ctx, req, pdResult(decode, pool)))
++	_, pending := d.inflight.Load("x")
++	assert.False(t, pending, "nothing is tracked when exclusion is off")
++}
++
++func TestHeteroPDDeciderReadsMeasuredSpeedLabel(t *testing.T) {
++	d := newTestHeteroDecider(t, heteroLabConfig())
++	speed := func(v string) map[string]string { return map[string]string{defaultSpeedLabel: v} }
++	cases := []struct {
++		label string
++		want  float64
++	}{
++		{"7200", 7200}, {"7200.5", 7200.5}, {"", 0}, {"fast", 0}, {"0", 0}, {"-5", 0}, {"+Inf", 0},
++	}
++	for _, c := range cases {
++		ep := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, speed(c.label))
++		assert.Equal(t, c.want, d.toPod(ep).PrefillTokensPerSec, "label %q", c.label)
++	}
++	cfg := heteroLabConfig()
++	cfg.SpeedLabel = ""
++	off := newTestHeteroDecider(t, cfg)
++	ep := heteroEndpoint("a30-0", bylabel.RolePrefill, heteroClassA30, 0, 0, 0, speed("7200"))
++	assert.Zero(t, off.toPod(ep).PrefillTokensPerSec, "an empty speedLabel turns the label off")
++}
 diff --git a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
-index 9e3656bc..382e02c0 100644
+index 9e3656bc..d824d0e6 100644
 --- a/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
 +++ b/pkg/epp/framework/plugins/scheduling/profilehandler/disagg/metrics.go
 @@ -19,6 +19,7 @@ package disagg
@@ -1653,7 +2711,7 @@ index 9e3656bc..382e02c0 100644
  
  	"github.com/prometheus/client_golang/prometheus"
  	compbasemetrics "k8s.io/component-base/metrics"
-@@ -38,6 +39,16 @@ var (
+@@ -38,6 +39,26 @@ var (
  		},
  		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
  	)
@@ -1667,23 +2725,38 @@ index 9e3656bc..382e02c0 100644
 +		},
 +		[]string{"plugin_name", "reason", "remote_prefill"},
 +	)
++
++	// LlmdHeteroPDExclusionCount records prefill/decode pairs excluded after failed handoffs.
++	LlmdHeteroPDExclusionCount = prometheus.NewCounterVec(
++		prometheus.CounterOpts{
++			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
++			Name:      "hetero_pd_pair_exclusions_total",
++			Help:      metricsutil.HelpMsgWithStability("Total number of prefill/decode pairs hetero-pd-decider excluded after failed handoffs", compbasemetrics.ALPHA),
++		},
++		[]string{"plugin_name"},
++	)
  )
  
  func registerMetrics(registerer prometheus.Registerer) error {
-@@ -46,6 +57,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
+@@ -46,6 +67,8 @@ func registerMetrics(registerer prometheus.Registerer) error {
  	}
  	for _, collector := range []prometheus.Collector{
  		LlmdDisaggDecisionCount,
 +		LlmdHeteroPDDecisionCount,
++		LlmdHeteroPDExclusionCount,
  	} {
  		if err := registerer.Register(collector); err != nil {
  			var alreadyRegistered prometheus.AlreadyRegisteredError
-@@ -58,6 +70,10 @@ func registerMetrics(registerer prometheus.Registerer) error {
+@@ -58,6 +81,14 @@ func registerMetrics(registerer prometheus.Registerer) error {
  	return nil
  }
  
 +func recordHeteroPDDecision(pluginName, reason string, remote bool) {
 +	LlmdHeteroPDDecisionCount.WithLabelValues(pluginName, reason, strconv.FormatBool(remote)).Inc()
++}
++
++func recordHeteroPDExclusion(pluginName string) {
++	LlmdHeteroPDExclusionCount.WithLabelValues(pluginName).Inc()
 +}
 +
  // RecordDisaggDecision increments the counter for a disaggregation routing decision.

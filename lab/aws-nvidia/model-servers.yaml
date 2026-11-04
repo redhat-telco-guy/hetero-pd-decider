@@ -1,0 +1,134 @@
+# Three vLLM servers on three NVIDIA generations, same model and settings:
+#   prefill-t4    Tesla T4  (Turing, cc 7.5)   reads prompts
+#   prefill-a10g  A10G      (Ampere, cc 8.6)   reads prompts
+#   decode-l4     L4        (Ada, cc 8.9)      writes answers, behind the routing sidecar
+# fp16 everywhere: the T4 has no bf16, and KV dtype must match for a handoff.
+# No compatibility label here: lab/compat's labeler sets llm-d.ai/kv-compat-key from what
+# each server actually runs. __MODEL__, __*_PRODUCT__ and __BACKEND_ARG__ are filled in by
+# 05-aws-model-servers.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prefill-t4}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: prefill-t4}}
+  template:
+    metadata:
+      labels: {app: prefill-t4, llm-d.ai/inference-serving: "true", llm-d.ai/guide: hetero-pd, llm-d.ai/role: prefill, llm-d.ai/accelerator-class: nvidia-t4}
+    spec:
+      serviceAccountName: hetero-pd
+      nodeSelector: {nvidia.com/gpu.product: __T4_PRODUCT__}
+      containers:
+        - name: modelserver
+          image: docker.io/vllm/vllm-openai:v0.26.0
+          command: ["vllm", "serve"]
+          args: ["__MODEL__", "--port=8000", "--dtype=half", "--block-size=16", "--max-model-len=8192",
+                 "--gpu-memory-utilization=0.85", "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+                 __BACKEND_ARG__"--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}']
+          env:
+            - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: llm-d-hf-token, key: HF_TOKEN}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
+            - {name: UCX_TLS, value: tcp}
+          ports:
+            - {name: modelserver, containerPort: 8000, protocol: TCP}
+            - {name: nixl, containerPort: 5600, protocol: TCP}
+          readinessProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10}
+          startupProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10, failureThreshold: 90}
+          resources:
+            requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 13Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {mountPath: /dev/shm, name: shm}
+            - {mountPath: /root/.cache/huggingface, name: hf-cache}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+        - {name: hf-cache, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prefill-a10g}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: prefill-a10g}}
+  template:
+    metadata:
+      labels: {app: prefill-a10g, llm-d.ai/inference-serving: "true", llm-d.ai/guide: hetero-pd, llm-d.ai/role: prefill, llm-d.ai/accelerator-class: nvidia-a10g}
+    spec:
+      serviceAccountName: hetero-pd
+      nodeSelector: {nvidia.com/gpu.product: __A10G_PRODUCT__}
+      containers:
+        - name: modelserver
+          image: docker.io/vllm/vllm-openai:v0.26.0
+          command: ["vllm", "serve"]
+          args: ["__MODEL__", "--port=8000", "--dtype=half", "--block-size=16", "--max-model-len=8192",
+                 "--gpu-memory-utilization=0.85", "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+                 __BACKEND_ARG__"--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}']
+          env:
+            - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: llm-d-hf-token, key: HF_TOKEN}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
+            - {name: UCX_TLS, value: tcp}
+          ports:
+            - {name: modelserver, containerPort: 8000, protocol: TCP}
+            - {name: nixl, containerPort: 5600, protocol: TCP}
+          readinessProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10}
+          startupProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10, failureThreshold: 90}
+          resources:
+            requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 24Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {mountPath: /dev/shm, name: shm}
+            - {mountPath: /root/.cache/huggingface, name: hf-cache}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+        - {name: hf-cache, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: decode-l4}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: decode-l4}}
+  template:
+    metadata:
+      labels: {app: decode-l4, llm-d.ai/inference-serving: "true", llm-d.ai/guide: hetero-pd, llm-d.ai/role: decode, llm-d.ai/accelerator-class: nvidia-l4}
+    spec:
+      serviceAccountName: hetero-pd
+      nodeSelector: {nvidia.com/gpu.product: __L4_PRODUCT__}
+      initContainers:
+        - name: routing-proxy
+          image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v1.0.0
+          args: ["--port=8000", "--kv-connector=nixlv2", "--zap-log-level=1", "--secure-serving=false"]
+          ports: [{name: sidecar, containerPort: 8000, protocol: TCP}]
+          restartPolicy: Always
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true}
+      containers:
+        - name: modelserver
+          image: docker.io/vllm/vllm-openai:v0.26.0
+          command: ["vllm", "serve"]
+          args: ["__MODEL__", "--port=8200", "--dtype=half", "--block-size=16", "--max-model-len=8192",
+                 "--gpu-memory-utilization=0.85", "--disable-access-log-for-endpoints=/health,/metrics,/v1/models",
+                 __BACKEND_ARG__"--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}']
+          env:
+            - {name: HF_TOKEN, valueFrom: {secretKeyRef: {name: llm-d-hf-token, key: HF_TOKEN}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5600"}
+            - {name: UCX_TLS, value: tcp}
+          ports:
+            - {name: modelserver, containerPort: 8200, protocol: TCP}
+            - {name: nixl, containerPort: 5600, protocol: TCP}
+          readinessProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10}
+          startupProbe: {httpGet: {path: /v1/models, port: modelserver}, periodSeconds: 10, failureThreshold: 90}
+          resources:
+            requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+            limits: {memory: 48Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {mountPath: /dev/shm, name: shm}
+            - {mountPath: /root/.cache/huggingface, name: hf-cache}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+        - {name: hf-cache, emptyDir: {}}

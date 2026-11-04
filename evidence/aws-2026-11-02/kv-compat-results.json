@@ -1,0 +1,20 @@
+{
+  "kv-655982265078.to.kv-5f50cea6de24.json": {
+    "time": "2026-11-02T17:56:52Z",
+    "verdict": "FAIL",
+    "pair": "kv-655982265078->kv-5f50cea6de24",
+    "prefill": "prefill-t4-b7c84fdd-llqmz",
+    "decode": "decode-l4-55bbc74f4-z9xxz",
+    "errors": 20,
+    "compared": 0,
+    "first_token_same": 0,
+    "split_agreement": 0,
+    "prefill_alone_agreement": 0,
+    "checks": {
+      "no split failures": false,
+      "first token matches in >= 95% of prompts": false,
+      "split agrees at least as long as the prefill card alone (-10%)": true
+    },
+    "model": "Qwen/Qwen2.5-1.5B-Instruct"
+  }
+}
